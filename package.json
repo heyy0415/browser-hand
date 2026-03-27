@@ -1,0 +1,49 @@
+{
+  "name": "browser-hand",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages-engine",
+    "packages-engine/shared",
+    "app/*"
+  ],
+  "scripts": {
+    "dev": "concurrently --names \"server,web\" --prefix-colors \"cyan,magenta\" \"bun run dev:server\" \"bun run dev:web\"",
+    "dev:server": "bun run --cwd app/server dev",
+    "dev:web": "bun run --cwd app/web-page dev",
+    "build": "bun run build:web",
+    "build:web": "bun run --cwd app/web-page build",
+    "lint": "eslint . --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.36",
+    "@langchain/openai": "^1.3.1",
+    "hono": "^4.12.9",
+    "langchain": "^1.2.37",
+    "playwright": "^1.58.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "zod": "^3.24.1",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/bun": "^1.3.11",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@typescript-eslint/eslint-plugin": "^8.57.2",
+    "@typescript-eslint/parser": "^8.57.2",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.4.27",
+    "eslint": "^10.1.0",
+    "postcss": "^8.5.8",
+    "bun-types": "1.3.11",
+    "concurrently": "^9.1.0",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.3"
+  }
+}

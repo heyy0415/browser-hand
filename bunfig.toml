@@ -1,0 +1,11 @@
+[install]
+peer = false
+
+[install.workspaces]
+enabled = true
+
+[install.cache]
+disabled = true
+
+[install.nodeLinker]
+name = "node-modules"
