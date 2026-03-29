@@ -1,0 +1,85 @@
+---
+description: 
+globs: "*.js,*.ts,*.jsx,*.tsx,*.vue,*.css,*.scss"
+alwaysApply: false
+---
+# 🔄 代码复用优先原则
+
+## 核心思想
+**在写任何代码之前，先问：项目中是否已有类似实现？能否复用或扩展现有代码？**
+
+## 技术栈检查清单
+
+### Vue 2.7 移动端项目
+#### 写新组件前
+- [ ] **ZZ-UI 组件库**：是否有对应的 `@zz-common/zz-ui` 组件？
+- [ ] **业务组件**：`src/components/` 下是否已有相似组件？
+- [ ] **页面组件**：`src/views/` 中是否有可复用的页面结构？
+
+#### 写新逻辑前
+- [ ] **工具函数**：`src/utils/` 目录下是否已有相似工具？
+- [ ] **ZZ工具包**：`@zz-common/zz-utils` 中是否有现成方法？
+- [ ] **组合式函数**：`src/composables/` 下是否有可复用逻辑？
+
+#### 写新样式前
+- [ ] **Sass变量**：`@zz/sasscore` 中是否有对应的变量和 mixin？
+- [ ] **组件样式**：ZZ-UI 组件是否提供足够的样式定制？
+
+### React + Umi + Antd 后台管理项目
+#### 写新组件前
+- [ ] **Antd 组件**：Antd 组件库是否有对应组件？
+- [ ] **业务组件**：`src/components/` 下是否已有相似业务组件？
+- [ ] **ProComponents**：是否可以使用 `@ant-design/pro-components`？
+
+#### 写新逻辑前
+- [ ] **工具函数**：`src/utils/` 目录下是否已有相似工具？
+- [ ] **Hooks**：`src/hooks/` 下是否有可复用的自定义 hooks？
+
+#### 写新样式前
+- [ ] **Antd 主题**：是否可以通过 Antd 主题定制实现？
+- [ ] **CSS Modules**：是否复用现有的样式模块？
+
+### Egg 服务端项目
+#### 写新接口前
+- [ ] **基础控制器**：`app/controller/` 下是否有可继承的基础控制器？
+- [ ] **中间件**：`app/middleware/` 中是否有可复用的中间件？
+
+#### 写新服务前
+- [ ] **基础服务**：`app/service/` 下是否有可继承的基础服务类？
+- [ ] **数据库操作**：是否复用现有的 Model 和查询方法？
+
+## 复用示例
+
+### Vue 组件复用
+```vue
+<!-- ❌ 避免：重复实现基础组件 -->
+<div class="custom-button" @click="handleClick">提交</div>
+
+<!-- ✅ 推荐：使用 ZZ-UI 组件 -->
+<z-button type="primary" @click="handleClick">提交</z-button>
+```
+
+### React 组件复用
+```tsx
+// ❌ 避免：为每个表格重复实现相同功能
+const UserList = () => {
+  const [loading, setLoading] = useState(false)
+  const [dataSource, setDataSource] = useState([])
+  // 重复的分页、搜索、排序逻辑...
+}
+
+// ✅ 推荐：使用 ProTable 组件
+import { ProTable } from '@ant-design/pro-components'
+const UserList = () => (
+  <ProTable request={fetchUsers} columns={userColumns} rowKey="id" />
+)
+```
+
+## 检查清单
+
+写代码前必须检查：
+- [ ] 是否已搜索现有代码库
+- [ ] 是否可以使用现有组件库
+- [ ] 是否可以复用现有工具函数
+- [ ] 是否可以扩展现有组件
+- [ ] 是否遵循 DRY 原则

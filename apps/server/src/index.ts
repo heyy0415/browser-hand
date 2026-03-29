@@ -1,0 +1,81 @@
+/** server — HTTP 服务入口 */
+/// <reference types="bun-types" />
+
+import { Hono } from 'hono';
+import { cors } from 'hono/cors';
+import { streamSSE } from 'hono/streaming';
+import { runPipeline } from '@browser-hand/engine';
+import { logger } from '@browser-hand/engine';
+
+const log = (msg: string, meta?: unknown) => logger.info('server', msg, meta);
+const PORT = Number(process.env.PORT) || 3000;
+
+const app = new Hono();
+
+app.use('*', cors());
+
+// 健康检查
+app.get('/api/health', (c) => c.json({ status: 'ok' }));
+
+// 主流程：POST /api/task
+app.post('/api/task', async (c) => {
+  const body = await c.req.json<{ userInput: string }>();
+  const { userInput } = body;
+
+  if (!userInput) {
+    return c.json({ error: 'userInput 是必需的' }, 400);
+  }
+
+  const sessionId = crypto.randomUUID();
+  log('new task', { sessionId, userInput });
+
+  return streamSSE(c, async (stream) => {
+    try {
+      const { stream: pipelineStream, result } = await runPipeline(userInput, sessionId);
+
+      const reader = pipelineStream.getReader();
+      const decoder = new TextDecoder();
+      let currentEvent = 'chunk';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value, { stream: true });
+        const lines = text.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+            continue;
+          }
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim();
+            try {
+              const parsed = JSON.parse(data);
+              await stream.writeSSE({ event: currentEvent, data: JSON.stringify(parsed) });
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+
+      await result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log('task error', msg);
+      await stream.writeSSE({
+        event: 'error',
+        data: JSON.stringify({ message: msg }),
+      });
+    }
+  });
+});
+
+console.log(`后端服务：http://localhost:${PORT}`);
+
+Bun.serve({
+  port: PORT,
+  fetch: app.fetch,
+  idleTimeout: 255,
+});

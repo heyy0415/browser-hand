@@ -12,8 +12,14 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@browser-hand/engine": ["packages/engine/index.ts"],
+      "@browser-hand/ui": ["packages/ui/src/index.ts"],
+      "@browser-hand/ui/*": ["packages/ui/src/*"]
+    }
   },
-  "include": ["packages/**/*", "app/**/*"],
+  "include": ["packages/**/*", "apps/**/*"],
   "exclude": ["node_modules", "dist"]
 }

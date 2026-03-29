@@ -1,0 +1,117 @@
+---
+description: 
+globs: *.vue
+alwaysApply: false
+---
+# ZZ-UI 组件库使用
+
+## 核心目标
+当生成Vue移动端页面代码时，优先使用ZZ-UI组件库，避免从零开始写HTML/CSS。
+
+## 常用组件速查
+
+### Icon 图标
+```vue
+<!-- 使用转转 6.0图标 -->
+<z-icon class-prefix="zziconfont" name="close" />
+<!-- 自定义图片 -->
+<z-icon name="297ce2ae-f7cb-4abf-867d-ba78bde25297.png" />
+```
+
+### Button 按钮
+```vue
+<!-- 基础用法 -->
+<z-button>默认按钮</z-button>
+<z-button type="primary" size="large">主要按钮</z-button>
+<!-- 加载状态 -->
+<z-button loading type="primary" loading-text="提交中..." size="small">提交</z-button>
+<!-- 底部按钮组 -->
+<z-button-group keep-position fixed>
+  <z-button size="large">取消</z-button>
+  <z-button size="large" type="primary">确认</z-button>
+</z-button-group>
+```
+
+### Stance 占位图
+```vue
+<z-stance type="general" descText="暂无信息" />
+```
+
+### NavBar 导航栏
+```vue
+<z-nav-bar 
+  title="页面标题"
+  left-arrow
+  className="v9"
+  @click-left="$router.back()"
+>
+  <template #right>
+    <span class="z-nav-bar__text">功能</span>
+  </template>
+</z-nav-bar>
+
+<!-- 配合FixTop使用实现页面顶部固定 -->
+<z-fix-top keepPosition>
+  <z-nav-bar title="页面标题" left-arrow />
+</z-fix-top>
+```
+
+### Tabs 标签页
+```vue
+<z-tabs v-model="activeTab" sticky>
+  <z-tab 
+    v-for="tab in tabs" 
+    :key="tab.name"
+    :title="tab.title" 
+    :name="tab.name"
+  >
+    {{ tab.content }}
+  </z-tab>
+</z-tabs>
+```
+
+### List 列表 + PullRefresh 下拉刷新
+```vue
+<z-pull-refresh v-model="refreshing" @refresh="onRefresh">
+  <z-list 
+    v-model="loading" 
+    :finished="finished"
+    finished-text="没有更多了"
+    @load="onLoad"
+  >
+    <div v-for="item in list" :key="item.id" class="item">
+      <!-- 列表项内容 -->
+    </div>
+  </z-list>
+</z-pull-refresh>
+```
+
+### ActionPicker 抽屉/半层
+```vue
+<z-action-picker
+  v-model="show"
+  title="标题"
+  height="80vh"
+  @close="$toast('关闭')"
+>
+  <div class="slot">内容区域</div>
+</z-action-picker>
+```
+
+### Picker 选择器
+```vue
+<z-picker
+  v-model="value"
+  :columns="columns"
+  title="请选择"
+  @confirm="onConfirm"
+  @cancel="onCancel"
+/>
+```
+
+## 检查清单
+
+使用ZZ-UI组件时必须确保：
+- [ ] 优先使用ZZ-UI组件而非原生HTML
+- [ ] 正确使用组件属性和事件
+- [ ] 优先使用组件内置属性，避免大量自定义样式
