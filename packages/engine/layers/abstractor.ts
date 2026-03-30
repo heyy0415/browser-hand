@@ -1,7 +1,7 @@
 /** abstractor 层 — 操作规划，使用 LangChain + shared prompt */
 
-import { createSSEStream, logger, createLLM, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY } from '../utils';
-import { PLAN_SYSTEM_PROMPT, PLAN_USER_PROMPT } from '../shared/index';
+import { createSSEStream, logger, createLLM } from '../utils';
+import { PLAN_SYSTEM_PROMPT, PLAN_USER_PROMPT, LLM_MAX_RETRIES, LLM_RETRY_BASE_DELAY } from '../shared/index';
 import type { IntentionResult, ScannerResult, AbstractorResult } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('abstractor', msg, meta);
@@ -70,7 +70,7 @@ export async function generateAbstractor(
   send('start', { message: '正在生成动作计划...' });
   log('start', { intent, snapshot });
 
-  const llm = createLLM(0);
+  const llm = createLLM(0, 'qwen-flash');
 
   const result = callWithRetry(llm, intent, snapshot)
     .then((plan) => {

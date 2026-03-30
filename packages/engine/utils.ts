@@ -1,24 +1,20 @@
-/** engine — SSE 工具 + Logger + LLM */
+/** engine — SSE 工具 + Logger */
 
 import { ChatOpenAI } from "@langchain/openai";
+import { LLM_CONFIG } from "./shared/index";
 import type { SSEEventType } from "./types";
 
 // ============================================================
-//  LLM
+//  LLM Factory
 // ============================================================
 
-export const LLM_MAX_RETRIES = 3;
-export const LLM_RETRY_BASE_DELAY = 1000;
-
-export const LLM_CONFIG = {
-  model: "qwen-plus",
-  apiKey: "sk-3696886102834bbb99ca1773b25edd1e",
-  baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-};
-
-export function createLLM(temperature = 0) {
+/**
+ * 创建 LLM 实例
+ * @param temperature - 温度参数（0-1），控制输出的随机性
+ */
+export function createLLM(temperature = 0, model = '') {
   return new ChatOpenAI({
-    model: LLM_CONFIG.model,
+    model,
     apiKey: LLM_CONFIG.apiKey,
     configuration: { baseURL: LLM_CONFIG.baseUrl },
     temperature,

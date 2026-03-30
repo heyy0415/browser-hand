@@ -1,4 +1,4 @@
-/** pipeline — 五层流水线 (intention → scanner → vector → abstractor → runner) */
+// pipeline.ts
 
 import { createSSEStream, logger } from './utils';
 import type {
@@ -8,100 +8,85 @@ import type {
   AbstractorResult,
   RunnerResult,
   SSEEventType,
+  ClientType,
 } from './types';
 
 const log = (msg: string, meta?: unknown) => logger.info('pipeline', msg, meta);
 
-interface StepMessage {
-  step: string;
-  data: unknown;
-  type: 'delta' | 'completed';
+interface PipelineOptions {
+  clientType?: ClientType;
+  pageHtml?: string;
+  pageElements?: any[];
 }
 
-function sendStepMessage(
+/**
+ * 向前端发送步骤事件
+ */
+function sendStream(
   send: (event: SSEEventType, data: unknown) => void,
-  step: string,
-  type: 'delta' | 'completed',
+  type: 'start' | 'delta' | 'delta_done' | 'completed' | 'error',
   data: unknown,
 ) {
-  send('step' as SSEEventType, {
-    step,
-    data,
-    type,
-  } as StepMessage);
+  send(type as SSEEventType, data);
 }
 
 export async function runPipeline(
   userInput: string,
   sessionId: string,
+  options: PipelineOptions = {},
 ): Promise<{
   stream: ReadableStream<Uint8Array>;
   result: Promise<{
     intention: IntentionResult;
-    scanner: ScannerResult;
-    vector: VectorResult;
-    abstractor: AbstractorResult;
-    runner: RunnerResult;
   }>;
 }> {
   const { stream, send, close } = createSSEStream();
 
   const result = (async () => {
-    // ── Layer 1: Intention ──────────────────────────────────
-    log('Layer 1: Intention start');
-    sendStepMessage(send, 'intention', 'delta', { message: '正在解析意图...' });
+    try {
+      // ══════════════════════════════════════════
+      // Layer 1: Intention（流式）
+      // ══════════════════════════════════════════
+      sendStream(send, 'start', '');
 
-    const { parseIntention } = await import('./layers/intention');
-    const intention = await parseIntention(userInput).then((r) => r.result);
+      const { parseIntention } = await import('./layers/intention');
+      const intention = await parseIntention(userInput, {
+        // 实时转发 LLM 推理过程到前端
+        onDelta: (accumulated) => {
+          sendStream(send, 'delta', accumulated);
+        },
+        ondeltaDone: (content) => {
+          sendStream(send, 'delta_done', content);
+        },
+        onError: (error) => {
+          sendStream(send, 'error', error);
+        },
+      });
 
-    sendStepMessage(send, 'intention', 'completed', intention);
-    log('Layer 1: Intention done', intention);
+      sendStream(send, 'completed', JSON.stringify(intention));
 
-    // ── Layer 2: Scanner ────────────────────────────────────
-    log('Layer 2: Scanner start');
-    sendStepMessage(send, 'scanner', 'delta', { message: '正在扫描页面...' });
+      // 检查意图是否有效
+      if (!intention.flow || intention.flow.length === 0) {
+        send('error' as SSEEventType, '无法识别用户意图');
+        send('done' as SSEEventType, JSON.stringify({ success: false, sessionId }));
+        close();
+        throw new Error('无法识别用户意图');
+      }
 
-    const { scanPage } = await import('./layers/scanner');
-    const url = intention.meta.startUrl ?? 'https://www.baidu.com';
-    const scanner = await scanPage(url).then((r) => r.result);
+      // ══════════════════════════════════════════
+      // 完成
+      // ══════════════════════════════════════════
+      close();
 
-    sendStepMessage(send, 'scanner', 'completed', scanner);
-    log('Layer 2: Scanner done', scanner);
+      return { intention };
 
-    // ── Layer 3: Vector（默认透传）──────────────────────────
-    log('Layer 3: Vector (pass-through)');
-    sendStepMessage(send, 'vector', 'delta', { message: 'Vector 层默认流转...' });
-
-    const { processVector } = await import('./layers/vector');
-    const vector = await processVector(scanner).then((r) => r.result);
-
-    sendStepMessage(send, 'vector', 'completed', vector);
-    log('Layer 3: Vector done');
-
-    // ── Layer 4: Abstractor ─────────────────────────────────
-    log('Layer 4: Abstractor start');
-    sendStepMessage(send, 'abstractor', 'delta', { message: '正在生成动作计划...' });
-
-    const { generateAbstractor } = await import('./layers/abstractor');
-    const abstractor = await generateAbstractor(intention, scanner).then((r) => r.result);
-
-    sendStepMessage(send, 'abstractor', 'completed', abstractor);
-    log('Layer 4: Abstractor done', abstractor);
-
-    // ── Layer 5: Runner（默认成功）───────────────────────────
-    log('Layer 5: Runner start');
-    sendStepMessage(send, 'runner', 'delta', { message: '正在执行动作...' });
-
-    const { executeRunner } = await import('./layers/runner');
-    const runner = await executeRunner(abstractor).then((r) => r.result);
-
-    sendStepMessage(send, 'runner', 'completed', runner);
-    log('Layer 5: Runner done', runner);
-
-    send('done' as SSEEventType, { success: true, sessionId });
-    close();
-
-    return { intention, scanner, vector, abstractor, runner };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      send('error' as SSEEventType, JSON.stringify({ message: msg }));
+      send('done' as SSEEventType, JSON.stringify({ success: false, sessionId }));
+      close();
+      throw err;
+    }
   })();
 
   return { stream, result };

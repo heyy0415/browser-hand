@@ -47,6 +47,7 @@ export async function submitTask(
       const lines = chunk.split('\n');
 
       for (const line of lines) {
+        console.log(line)
         if (line.startsWith('event: ')) {
           currentEvent = line.slice(7).trim();
           continue;
@@ -57,6 +58,7 @@ export async function submitTask(
 
           try {
             const parsed = JSON.parse(data);
+            console.log(parsed)
             options.onEvent({ event: currentEvent as any, data: parsed });
           } catch (err) {
             // 忽略 JSON 解析错误

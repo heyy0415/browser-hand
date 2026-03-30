@@ -1,6 +1,12 @@
 /** engine — 全部类型 */
 
 // ============================================================
+//  Client Type
+// ============================================================
+
+export type ClientType = 'web' | 'extension';
+
+// ============================================================
 //  Intention 层
 // ============================================================
 
@@ -12,11 +18,11 @@ export interface IntentionResult {
     action: string;
     params: Record<string, unknown>;
   }>;
-  meta: {
-    startUrl: string | null;
-    pageType: string | null;
-    crossPage: boolean;
-    summary: string;
+  meta?: {
+    startUrl?: string | null;
+    pageType?: string | null;
+    crossPage?: boolean;
+    summary?: string;
   };
 }
 
@@ -63,7 +69,7 @@ export interface ScannerResult {
 //  Vector 层（默认透传）
 // ============================================================
 
-export interface VectorResult extends ScannerResult {}
+export interface VectorResult extends ScannerResult { }
 
 // ============================================================
 //  Abstractor 层
@@ -83,7 +89,13 @@ export interface AbstractorResult {
 export interface ActionResult {
   step: number;
   success: boolean;
-  data?: unknown;
+  data?: {
+    type?: string;
+    code?: string;
+    pseudoCode?: string;
+    script?: string;
+    [key: string]: unknown;
+  };
   error?: string;
   screenshot?: string;
 }
@@ -98,16 +110,13 @@ export interface RunnerResult {
 
 export const SSE_EVENT_TYPES = [
   'start',
-  'chunk',
-  'tool_call',
-  'tool_result',
-  'action',
-  'screenshot',
-  'error',
+  'delta',
+  'delta_done',
+  'completed',
   'done',
-  'step_start',
-  'step_complete',
+  'error'
 ] as const;
+
 export type SSEEventType = (typeof SSE_EVENT_TYPES)[number];
 
 export interface SSEEvent<T = unknown> {
@@ -118,5 +127,5 @@ export interface SSEEvent<T = unknown> {
 export interface StepEventData {
   step: string;
   data: unknown;
-  type: 'delta' | 'completed';
+  type: 'start' | 'delta' | 'delta_done' | 'completed' | 'done' | 'error';
 }

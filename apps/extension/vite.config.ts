@@ -45,6 +45,7 @@ export default defineConfig({
         side_panel: resolve(__dirname, 'src/side_panel.html'),
         popup: resolve(__dirname, 'src/popup.html'),
         background: resolve(__dirname, 'src/background.ts'),
+        'content-script': resolve(__dirname, 'src/content-script.ts'),
       },
       output: {
         entryFileNames: '[name].js',
