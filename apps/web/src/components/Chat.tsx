@@ -159,7 +159,7 @@ export const Chat: FC<ChatProps> = ({
                       {!message.completed && message.content ? (
                         <img src={loadingGif} alt="loading" className="b-handassistant-loading" />
                       ) : null}
-                      <div className="b-handassistant-text">{message.content}</div>
+                      <div className="b-handassistant-text">{message.content.trim()}</div>
                     </div>
                   </div>
                 ),

@@ -84,6 +84,7 @@ export interface VectorOptions {
 export interface AbstractorResult {
   code: string[];
   summary: string;
+  thinking?: string;
   meta?: {
     totalSteps: number;
     estimatedComplexity: 'low' | 'medium' | 'high';

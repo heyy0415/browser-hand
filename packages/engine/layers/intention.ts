@@ -57,18 +57,42 @@ export async function parseIntention(
 
   try {
     let accumulated = '';
+    let emittedReasoningLength = 0;
+
+    const extractReasoningContent = (text: string): string => {
+      const thinkingStart = text.indexOf('<thinking>');
+      if (thinkingStart === -1) {
+        return '';
+      }
+
+      const contentStart = thinkingStart + '<thinking>'.length;
+      const thinkingEnd = text.indexOf('</thinking>', contentStart);
+      if (thinkingEnd === -1) {
+        return text.slice(contentStart);
+      }
+
+      return text.slice(contentStart, thinkingEnd);
+    };
 
     for await (const delta of streamLLM([
       { role: 'system', content: INTENT_SYSTEM_PROMPT },
       { role: 'user', content: INTENT_USER_PROMPT(question) },
     ])) {
       accumulated += delta;
-      callbacks.onDelta?.(accumulated);
+
+      const reasoningContent = extractReasoningContent(accumulated);
+      if (reasoningContent.length > emittedReasoningLength) {
+        const incrementalReasoning = reasoningContent.slice(emittedReasoningLength);
+        callbacks.onDelta?.(incrementalReasoning);
+        emittedReasoningLength = reasoningContent.length;
+      }
     }
 
-    callbacks.ondeltaDone?.(accumulated);
+    const finalReasoningContent = extractReasoningContent(accumulated).trim();
+    callbacks.ondeltaDone?.(finalReasoningContent);
 
-    const jsonMatch = accumulated.match(/\{[\s\S]*\}/);
+    const contentWithoutThinking = accumulated.replace(/<thinking>[\s\S]*?<\/thinking>/, '').trim();
+    const jsonMatch = contentWithoutThinking.match(/\{[\s\S]*\}/) ?? accumulated.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
       throw new Error('LLM 响应中未找到 JSON');
     }

@@ -40,7 +40,7 @@ function parsePseudo(line: string): ParsedPseudo {
 }
 
 function resolveActionType(method: string): ActionResultType {
-  if (method === 'navigate') return 'navigate';
+  if (method === 'navigate' || method === 'open') return 'navigate';
   if (method === 'fill') return 'fill';
   if (method === 'select') return 'select';
   if (method === 'check' || method === 'uncheck') return 'check';
@@ -82,6 +82,7 @@ export async function run(
       try {
         switch (method) {
           case 'navigate':
+          case 'open':
             await page.goto(args[0], { waitUntil: 'domcontentloaded' });
             break;
           case 'click':

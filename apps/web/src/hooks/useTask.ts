@@ -125,6 +125,7 @@ export function useTask() {
 
       try {
         await submitTask(text, {
+          headless: false,
           onEvent: (event: SSEEvent) => {
             updateSession(activeSession.id, (session) => ({
               ...session,

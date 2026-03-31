@@ -53,15 +53,12 @@ export async function runPipeline(
 
   const result = (async () => {
     try {
-      emit(send, 'start', { sessionId });
-
-      emit(send, 'start', { step: 'intention' });
       const intention = await parseIntention(question, {
-        onDelta: (accumulated) => {
-          emit(send, 'delta', { step: 'intention', data: accumulated });
+        onDelta: (delta) => {
+          emit(send, 'delta', { step: 'intention', data: delta });
         },
-        ondeltaDone: (content) => {
-          emit(send, 'delta_done', { step: 'intention', data: content });
+        ondeltaDone: (thinking) => {
+          emit(send, 'delta_done', { step: 'intention', data: thinking });
         },
       });
       emit(send, 'completed', { step: 'intention', data: intention });
@@ -71,26 +68,25 @@ export async function runPipeline(
         throw new Error('未找到目标 URL');
       }
 
-      emit(send, 'start', { step: 'scanner' });
       const scan: ScannerResult = await scanPage(targetUrl, {
         pageId: 'p0',
         timeout: 30_000,
-        onProgress: (message) => emit(send, 'delta', { step: 'scanner', message }),
       });
-      emit(send, 'completed', { step: 'scanner', data: { url: scan.url, elements: scan.elements } });
+      emit(send, 'completed', { step: 'scanner', data: scan });
 
-      emit(send, 'start', { step: 'vector' });
       const vector: VectorResult = await vectorize(scan, intention, { topK: 10, minScore: 0.1 });
       emit(send, 'completed', { step: 'vector', data: vector });
 
-      emit(send, 'start', { step: 'abstractor' });
-      const abstractor: AbstractorResult = await abstract(intention, vector);
-      for (const line of abstractor.code) {
-        emit(send, 'delta', { step: 'abstractor', data: line });
-      }
+      const abstractor: AbstractorResult = await abstract(intention, vector, {
+        onDelta: (delta) => {
+          emit(send, 'delta', { step: 'abstractor', data: delta });
+        },
+        ondeltaDone: (thinking) => {
+          emit(send, 'delta_done', { step: 'abstractor', data: thinking });
+        },
+      });
       emit(send, 'completed', { step: 'abstractor', data: abstractor });
 
-      emit(send, 'start', { step: 'runner' });
       const runner: RunnerResult = await run(targetUrl, abstractor, vector, {
         headless: options.headless ?? true,
         stepDelay: 500,
@@ -107,14 +103,13 @@ export async function runPipeline(
         runner,
       };
 
-      emit(send, 'done', { success: true, sessionId });
+      emit(send, 'done', { step: 'pipeline', data: { success: true, sessionId } });
       close();
       return pipelineResult;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       log('pipeline error', message);
-      emit(send, 'error', { message });
-      emit(send, 'done', { success: false, sessionId });
+      emit(send, 'done', { step: 'pipeline', data: { success: false, sessionId, error: message } });
       close();
       throw error;
     }
