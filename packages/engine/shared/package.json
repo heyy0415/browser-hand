@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./index.ts",
-  "types": "./index.ts"
+  "exports": {
+    "./constant": "./constant.ts",
+    "./util": "./util.ts",
+    "./type": "./type.ts"
+  }
 }

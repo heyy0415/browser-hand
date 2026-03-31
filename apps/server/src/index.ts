@@ -5,7 +5,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
 import { runPipeline } from '@browser-hand/engine';
-import { logger } from '@browser-hand/engine';
+import { logger } from '@@browser-hand/engine-shared/util';
 
 const log = (msg: string, meta?: unknown) => logger.info('server', msg, meta);
 const PORT = Number(process.env.PORT) || 3000;
@@ -19,19 +19,24 @@ app.get('/api/health', (c) => c.json({ status: 'ok' }));
 
 // 主流程：POST /api/task
 app.post('/api/task', async (c) => {
-  const body = await c.req.json<{ userInput: string }>();
-  const { userInput } = body;
+  const body = await c.req.json<{
+    question: string;
+    headless?: boolean;
+  }>();
+  const { question, headless } = body;
 
-  if (!userInput) {
-    return c.json({ error: 'userInput 是必需的' }, 400);
+  if (!question) {
+    return c.json({ error: 'question 是必需的' }, 400);
   }
 
   const sessionId = crypto.randomUUID();
-  log('new task', { sessionId, userInput });
+  log('new task', { sessionId, question });
 
   return streamSSE(c, async (stream) => {
     try {
-      const { stream: pipelineStream, result } = await runPipeline(userInput, sessionId);
+      const { stream: pipelineStream, result } = await runPipeline(question, sessionId, {
+        headless
+      });
 
       const reader = pipelineStream.getReader();
       const decoder = new TextDecoder();

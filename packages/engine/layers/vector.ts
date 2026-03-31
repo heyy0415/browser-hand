@@ -1,29 +1,47 @@
-/** vector 层 — 向量分析层，默认透传，固定返回执行成功 */
+/** vector 层 — 当前默认透传成功 */
 
-import { createSSEStream, logger } from '../utils';
-import type { ScannerResult, VectorResult } from '../types';
+import { createSSEStream, logger } from '@@browser-hand/engine-shared/util';
+import type {
+  IntentionResult,
+  ScannerResult,
+  VectorOptions,
+  VectorResult,
+} from '@@browser-hand/engine-shared/type';
 
 const log = (msg: string, meta?: unknown) => logger.info('vector', msg, meta);
 
-/** Vector 层默认透传，直接将 Scanner 结果作为成功结果返回 */
+export async function vectorize(
+  scan: ScannerResult,
+  _intention: IntentionResult,
+  _options: VectorOptions = {},
+): Promise<VectorResult> {
+  const result: VectorResult = {
+    url: scan.url,
+    matches: [],
+    elements: scan.elements,
+    success: true,
+    message: 'vector 默认执行成功（透传扫描结果）',
+  };
+
+  log('done', { success: true, elementCount: scan.elements.length });
+  return result;
+}
+
 export async function processVector(
-  scannerResult: ScannerResult,
+  scan: ScannerResult,
+  intention: IntentionResult,
+  options: VectorOptions = {},
 ): Promise<{ stream: ReadableStream<Uint8Array>; result: Promise<VectorResult> }> {
   const { stream, send, close } = createSSEStream();
-  send('start', { message: 'Vector 层默认流转...' });
-  log('start', scannerResult);
 
-  // 默认执行成功，直接透传 Scanner 结果
-  const result: VectorResult = { ...scannerResult };
+  const result = (async () => {
+    send('start', { step: 'vector' });
+    const vectorResult = await vectorize(scan, intention, options);
+    send('completed', { step: 'vector', data: vectorResult });
+    send('done', { success: true });
+    close();
+    return vectorResult;
+  })();
 
-  const promise = new Promise<VectorResult>((resolve) => {
-    setTimeout(() => {
-      log('done', result);
-      send('done', { success: true });
-      close();
-      resolve(result);
-    }, 50);
-  });
-
-  return { stream, result: promise };
+  return { stream, result };
 }

@@ -5,26 +5,28 @@
 
 import type { SSEEvent } from '@browser-hand/engine';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+const API_BASE_URL = import.meta.env.VITE_API_URL?.trim();
+const TASK_API_URL = API_BASE_URL ? `${API_BASE_URL}/api/task` : '/api/task';
 
 export interface TaskStreamOptions {
+  headless?: boolean;
   onEvent: (event: SSEEvent) => void;
   onError: (error: Error) => void;
   onComplete: () => void;
 }
 
-/**
- * 调用任务 API 并处理流式响应
- */
 export async function submitTask(
-  userInput: string,
+  question: string,
   options: TaskStreamOptions,
 ): Promise<void> {
   try {
-    const response = await fetch(`${API_BASE_URL}/api/task`, {
+    const response = await fetch(TASK_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userInput }),
+      body: JSON.stringify({
+        question,
+        headless: options.headless
+      }),
     });
 
     if (!response.ok) {
@@ -38,28 +40,52 @@ export async function submitTask(
 
     const decoder = new TextDecoder();
     let currentEvent = 'chunk';
+    let buffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        break;
+      }
 
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split('\n');
+      buffer += decoder.decode(value, { stream: true });
 
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim();
+      const segments = buffer.split('\n\n');
+      buffer = segments.pop() ?? '';
+
+      for (const segment of segments) {
+        if (!segment.trim()) {
           continue;
         }
-        if (line.startsWith('data: ')) {
+
+        const lines = segment.split('\n');
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+            continue;
+          }
+
+          if (!line.startsWith('data: ')) {
+            continue;
+          }
+
           const data = line.slice(6).trim();
-          if (!data) continue;
+          if (!data) {
+            continue;
+          }
 
           try {
             const parsed = JSON.parse(data);
-            options.onEvent({ event: currentEvent as any, data: parsed });
-          } catch (err) {
-            // 忽略 JSON 解析错误
+            const normalizedData =
+              typeof parsed === 'string'
+                ? parsed
+                : typeof parsed?.data === 'string'
+                  ? parsed.data
+                  : parsed;
+
+            options.onEvent({ event: currentEvent as SSEEvent['event'], data: normalizedData });
+          } catch {
+            options.onEvent({ event: currentEvent as SSEEvent['event'], data });
           }
         }
       }

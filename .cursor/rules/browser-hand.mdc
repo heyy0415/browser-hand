@@ -1,0 +1,506 @@
+---
+alwaysApply: true
+---
+
+## 项目概述
+
+browser-hand 是一个基于五层架构的浏览器自动化引擎项目，采用 TypeScript 全栈开发。
+
+### 技术栈
+- **前端**: React 19+ / Vite / TypeScript
+- **后端**: Bun / Hono / SSE 流式通信
+- **共享**: 自研引擎（五层架构）/ UI 组件库
+- **架构**: Monorepo（pnpm workspaces / bun workspaces）
+
+### 目录结构
+```
+browser-hand/
+├── packages/
+│   ├── engine/          # 核心引擎（五层架构）
+│   │   └── src/
+│   │       ├── layers/  # intention → scanner → vector → abstractor → runner
+│   │       ├── types.ts # 全局类型定义
+│   │       └── pipeline.ts # SSE 流水线编排
+│   └── ui/              # 共享 UI 组件库
+├── apps/
+│   ├── server/          # Hono 后端服务
+│   ├── web/             # React Web 应用
+│   └── extension/       # Chrome 插件
+```
+
+---
+
+## 1. 通用开发规范
+
+### 1.1 语言与格式
+- 所有代码使用 TypeScript，禁止使用 `any`（特殊情况需注释说明）
+- 使用 ESLint + Prettier 统一代码风格
+- 命名规范：
+  - 文件名：kebab-case（如 `task-api.ts`）
+  - 组件名：PascalCase（如 `ChatPanel`）
+  - 函数/变量：camelCase（如 `useTaskStream`）
+  - 常量：UPPER_SNAKE_CASE（如 `MAX_RETRY_COUNT`）
+  - 类型/接口：PascalCase，接口以 `I` 开头可选（如 `TaskState` 或 `ITaskState`）
+
+### 1.2 导入规范
+```typescript
+// 1. Node 内置模块
+import { join } from 'path';
+
+// 2. 第三方库
+import { Hono } from 'hono';
+import { useState } from 'react';
+
+// 3. 项目内部包（按层级由外到内）
+import { TaskType } from '@browser-hand/engine';
+import { useTask } from '../hooks/useTask';
+
+// 4. 本地模块
+import { formatResponse } from './utils';
+```
+
+### 1.3 注释规范
+- 公共 API、复杂逻辑必须添加 JSDoc 注释
+- 类型定义添加用途说明
+- 避免无意义注释（如 `// 设置变量`）
+
+```typescript
+/**
+ * 执行浏览器自动化任务
+ * @param task - 任务配置对象
+ * @param options - 执行选项
+ * @returns SSE 事件流
+ */
+async function executeTask(task: TaskConfig, options?: ExecuteOptions): Promise<EventStream>
+```
+
+---
+
+## 2. Monorepo 包管理规范
+
+### 2.1 包引用规则
+```json
+// package.json 中使用 workspace 协议
+{
+  "dependencies": {
+    "@browser-hand/engine": "workspace:*",
+  }
+}
+```
+
+### 2.2 包开发原则
+- **单一职责**：每个包只负责一个领域
+- **最小暴露**：通过 `index.ts` 统一导出，控制公开 API
+- **类型先行**：共享类型定义在 `engine/types.ts`
+
+### 2.3 跨包通信
+```typescript
+// packages/engine/src/types.ts - 集中定义共享类型
+export interface TaskEvent {
+  type: 'start' | 'progress' | 'complete' | 'error';
+  payload: unknown;
+  timestamp: number;
+}
+
+// 其他包引用
+import type { TaskEvent } from '@browser-hand/engine';
+```
+
+---
+
+## 3. 五层引擎架构规范（packages/engine）
+
+### 3.1 层级职责划分
+```
+用户意图 → [intention] → [scanner] → [vector] → [abstractor] → [runner] → 执行结果
+```
+
+| 层级 | 文件 | 职责 | 输入 | 输出 |
+|------|------|------|------|------|
+| intention | intention.ts | 解析用户自然语言意图 | 用户输入 | Intent 结构体 |
+| scanner | scanner.ts | 扫描页面 DOM 结构 | 页面 HTML | ElementTree |
+| vector | vector.ts | 向量化分析与匹配 | ElementTree + Intent | CandidateElements |
+| abstractor | abstractor.ts | 生成操作抽象计划 | CandidateElements | ActionPlan |
+| runner | runner.ts | 执行具体操作 | ActionPlan | ExecutionResult |
+
+### 3.2 层级实现模板
+```typescript
+// packages/engine/src/layers/scanner.ts
+import type { ScannerInput, ScannerOutput, LayerConfig } from '../types';
+
+export class ScannerLayer {
+  private config: LayerConfig;
+
+  constructor(config: LayerConfig) {
+    this.config = config;
+  }
+
+  /**
+   * 扫描页面元素并构建元素树
+   */
+  async process(input: ScannerInput): Promise<ScannerOutput> {
+    // 实现逻辑
+  }
+
+  /**
+   * 验证输入是否符合当前层要求
+   */
+  validate(input: ScannerInput): boolean {
+    // 验证逻辑
+  }
+}
+```
+
+### 3.3 Pipeline 流水线规范
+```typescript
+// packages/engine/src/pipeline.ts
+export class Pipeline {
+  private layers: Layer[];
+  private eventEmitter: EventEmitter;
+
+  /**
+   * 注册处理层
+   */
+  register(layer: Layer): this
+
+  /**
+   * 执行流水线，返回 SSE 事件流
+   */
+  async execute(input: PipelineInput): AsyncGenerator<PipelineEvent>
+}
+```
+
+---
+
+## 4. React 前端规范（apps/web）
+
+### 4.1 组件设计原则
+- **受控优先**：状态由父组件管理，子组件通过 props 接收
+- **组合优于继承**：使用组合模式构建复杂组件
+- **Hooks 抽象**：业务逻辑抽离到自定义 Hooks
+
+### 4.2 组件文件结构
+```typescript
+// components/ChatPanel/
+├── ChatPanel.tsx        # 组件主文件
+├── ChatPanel.types.ts   # 类型定义（可选，复杂组件使用）
+├── ChatPanel.hooks.ts   # 组件专属 hooks（可选）
+├── ChatPanel.styles.ts  # 样式（如使用 CSS-in-JS）
+└── index.ts             # 统一导出
+```
+
+### 4.3 组件实现模板
+```typescript
+
+/**
+ * 聊天组件 - 用于展示对话消息和接收用户输入
+ */
+export const Chat = forwardRef<ChatRef, ChatProps>(({
+  messages,
+  onSend,
+  loading = false,
+  placeholder = '输入消息...',
+  className,
+  ...rest
+}, ref) => {
+  // 1. Hooks
+  const [inputValue, setInputValue] = useState('');
+  
+  // 2. 事件处理
+  const handleSend = useCallback(() => {
+    if (!inputValue.trim()) return;
+    onSend(inputValue);
+    setInputValue('');
+  }, [inputValue, onSend]);
+
+  // 3. 渲染
+  return (
+    <div className={`chat-container ${className}`} {...rest}>
+      {/* 组件内容 */}
+    </div>
+  );
+});
+
+Chat.displayName = 'Chat';
+```
+
+### 4.4 自定义 Hooks 规范
+```typescript
+// apps/web/src/hooks/useTask.ts
+import { useState, useCallback, useRef, useEffect } from 'react';
+import type { TaskState, TaskEvent } from '@browser-hand/engine';
+
+interface UseTaskOptions {
+  onComplete?: (result: TaskResult) => void;
+  onError?: (error: Error) => void;
+}
+
+interface UseTaskReturn {
+  state: TaskState;
+  start: (config: TaskConfig) => Promise<void>;
+  cancel: () => void;
+  reset: () => void;
+}
+
+/**
+ * 任务管理 Hook - 处理 SSE 流式任务执行
+ */
+export function useTask(options?: UseTaskOptions): UseTaskReturn {
+  const [state, setState] = useState<TaskState>('idle');
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const start = useCallback(async (config: TaskConfig) => {
+    // 实现逻辑
+  }, []);
+
+  const cancel = useCallback(() => {
+    abortControllerRef.current?.abort();
+  }, []);
+
+  return { state, start, cancel, reset };
+}
+```
+
+---
+
+## 5. 后端 API 规范（apps/server）
+
+### 5.1 Hono 路由组织
+```typescript
+// apps/server/src/index.ts
+import { Hono } from 'hono';
+import { taskRouter } from './routes/task';
+import { cors } from 'hono/cors';
+
+const app = new Hono();
+
+// 中间件
+app.use('*', cors());
+
+// 路由注册
+app.route('/api/task', taskRouter);
+
+export default app;
+```
+
+### 5.2 SSE 端点实现
+```typescript
+// apps/server/src/routes/task.ts
+import { Hono } from 'hono';
+import { stream } from 'hono/streaming';
+import { Pipeline } from '@browser-hand/engine';
+
+export const taskRouter = new Hono();
+
+taskRouter.post('/execute', async (c) => {
+  const body = await c.req.json();
+  
+  return stream(c, async (stream) => {
+    const pipeline = new Pipeline();
+    
+    for await (const event of pipeline.execute(body)) {
+      await stream.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+    
+    await stream.close();
+  });
+});
+```
+
+### 5.3 错误处理
+```typescript
+// apps/server/src/middleware/error.ts
+import type { ErrorHandler } from 'hono';
+
+export const errorHandler: ErrorHandler = (err, c) => {
+  console.error(`[Error] ${err.message}`, err.stack);
+  
+  return c.json({
+    success: false,
+    error: {
+      code: err.cause || 'INTERNAL_ERROR',
+      message: err.message,
+    },
+  }, 500);
+};
+```
+
+---
+
+## 6. 浏览器插件规范（apps/extension）
+
+### 6.1 Manifest V3 规范
+```json
+// apps/extension/public/manifest.json
+{
+  "manifest_version": 3,
+  "name": "Browser Hand",
+  "version": "1.0.0",
+  "permissions": ["activeTab", "storage"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  }
+}
+```
+
+### 6.2 消息通信规范
+```typescript
+// apps/extension/src/services/messaging.ts
+type MessageType = 
+  | { type: 'EXECUTE_TASK'; payload: TaskConfig }
+  | { type: 'GET_STATE' }
+  | { type: 'CANCEL_TASK' };
+
+export function sendMessage<T extends MessageType>(
+  message: T
+): Promise<MessageResponse<T>> {
+  return chrome.runtime.sendMessage(message);
+}
+```
+
+---
+
+## 7. 测试规范
+
+### 7.1 测试文件位置
+```
+src/
+├── components/
+│   └── Button.tsx
+└── __tests__/
+    └── Button.test.tsx
+```
+
+### 7.2 测试模板
+```typescript
+// __tests__/engine/scanner.test.ts
+import { describe, it, expect, beforeEach } from 'vitest';
+import { ScannerLayer } from '../../packages/engine/src/layers/scanner';
+
+describe('ScannerLayer', () => {
+  let scanner: ScannerLayer;
+
+  beforeEach(() => {
+    scanner = new ScannerLayer({ /* config */ });
+  });
+
+  it('should scan page elements correctly', async () => {
+    const input = { html: '<button>Click</button>' };
+    const result = await scanner.process(input);
+    
+    expect(result.elements).toHaveLength(1);
+    expect(result.elements[0].tag).toBe('button');
+  });
+
+  it('should validate input before processing', () => {
+    expect(scanner.validate({ html: '' })).toBe(false);
+  });
+});
+```
+
+---
+
+## 8. Git 提交规范
+
+### 8.1 Commit 格式
+```
+<type>(<scope>): <subject>
+
+<body>
+
+<footer>
+```
+
+### 8.2 Type 类型
+- `feat`: 新功能
+- `fix`: 修复 Bug
+- `docs`: 文档更新
+- `style`: 代码格式（不影响逻辑）
+- `refactor`: 重构
+- `perf`: 性能优化
+- `test`: 测试相关
+- `chore`: 构建/工具变更
+
+### 8.3 示例
+```
+feat(engine): 添加向量分析层的相似度匹配算法
+
+- 实现余弦相似度计算
+- 支持批量元素匹配
+- 添加单元测试
+
+Closes #123
+```
+
+---
+
+## 9. 性能优化检查清单
+
+### 9.1 前端性能
+- [ ] 组件使用 `React.memo` 避免不必要的重渲染
+- [ ] 大列表使用虚拟滚动
+- [ ] 图片资源懒加载
+- [ ] 代码分割与动态导入
+
+### 9.2 后端性能
+- [ ] SSE 连接池管理
+- [ ] 避免阻塞事件循环
+- [ ] 合理使用缓存
+
+### 9.3 引擎性能
+- [ ] DOM 扫描结果缓存
+- [ ] 向量计算使用 Web Worker
+- [ ] 流式处理减少内存占用
+
+---
+
+## 10. 安全规范
+
+- 所有用户输入必须验证和转义
+- SSE 端点添加速率限制
+- 敏感配置使用环境变量
+- 插件权限最小化原则
+
+---
+
+## 11. 常用命令
+
+```bash
+# 安装依赖
+bun install
+
+# 开发模式
+bun run dev:web      # Web 应用
+bun run dev:server   # 后端服务
+bun run dev:ext      # 插件
+
+# 构建
+bun run build
+
+# 测试
+bun run test
+
+# 代码检查
+bun run lint
+bun run type-check
+```
+```
+
+---
+
+## 配置说明
+
+这个配置文件涵盖了你项目的以下关键方面：
+
+| 维度 | 覆盖内容 |
+|------|----------|
+| **架构规范** | 五层引擎职责划分、Monorepo 包管理 |
+| **代码风格** | TypeScript 严格模式、命名规范、导入顺序 |
+| **前端规范** | React 组件设计、Hooks 抽象、文件组织 |
+| **后端规范** | Hono 路由、SSE 实现、错误处理 |
+| **插件规范** | Manifest V3、消息通信 |
+| **工程规范** | Git 提交、测试、性能、安全 |
