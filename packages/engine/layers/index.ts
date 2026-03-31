@@ -1,6 +1,5 @@
 export { parseIntention } from './intention';
-export { scanPage } from './scanner';
-export { parsePage } from './parser';
-export { processVector } from './vector';
-export { generateAbstractor } from './abstractor';
-export { executeRunner } from './runner';
+export { scanPage, scanPageWithStream } from './scanner';
+export { vectorize, processVector } from './vector';
+export { abstract } from './abstractor';
+export { run } from './runner';

@@ -53,7 +53,6 @@ import { useState } from 'react';
 
 // 3. 项目内部包（按层级由外到内）
 import { TaskType } from '@browser-hand/engine';
-import { Button } from '@browser-hand/ui';
 import { useTask } from '../hooks/useTask';
 
 // 4. 本地模块
@@ -85,7 +84,6 @@ async function executeTask(task: TaskConfig, options?: ExecuteOptions): Promise<
 {
   "dependencies": {
     "@browser-hand/engine": "workspace:*",
-    "@browser-hand/ui": "workspace:*"
   }
 }
 ```
@@ -174,7 +172,7 @@ export class Pipeline {
 
 ---
 
-## 4. React 前端规范（apps/web & packages/ui）
+## 4. React 前端规范（apps/web）
 
 ### 4.1 组件设计原则
 - **受控优先**：状态由父组件管理，子组件通过 props 接收
@@ -193,9 +191,6 @@ export class Pipeline {
 
 ### 4.3 组件实现模板
 ```typescript
-// packages/ui/src/components/Chat.tsx
-import { forwardRef, useCallback } from 'react';
-import type { ChatProps, ChatRef } from './Chat.types';
 
 /**
  * 聊天组件 - 用于展示对话消息和接收用户输入

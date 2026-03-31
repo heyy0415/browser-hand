@@ -14,10 +14,10 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "baseUrl": ".",
+    "ignoreDeprecations": "6.0",
     "paths": {
       "@browser-hand/engine": ["packages/engine/index.ts"],
-      "@browser-hand/ui": ["packages/ui/src/index.ts"],
-      "@browser-hand/ui/*": ["packages/ui/src/*"]
+      "@@browser-hand/engine-shared/*": ["packages/engine/shared/*"]
     }
   },
   "include": ["packages/**/*", "apps/**/*"],

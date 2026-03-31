@@ -1,0 +1,324 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'PingFang SC', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  color: #101014;
+  background: #f7f8fa;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+.b-handapp {
+  display: grid;
+  grid-template-columns: 266px minmax(0, 1fr);
+  height: 100vh;
+  background: #fff;
+}
+
+.b-handsidebar {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #eceef2;
+  background: #f5f6f8;
+  padding: 12px 10px;
+  min-width: 0;
+}
+
+.b-handbrand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 8px;
+  margin-bottom: 20px;
+}
+
+.b-handbrand {
+  font-size: 16px;
+  line-height: 1.2;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.b-handnew-chat {
+  border: 0;
+  border-radius: 50%;
+  width: 24px;
+  height: 24px;
+  background: #e9ebef;
+  color: #303846;
+  cursor: pointer;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.b-handnav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+
+.b-handnav-item {
+  border: 0;
+  border-radius: 8px;
+  text-align: left;
+  background: transparent;
+  color: #3b4351;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.b-handnav-item-active {
+  background: #eceef2;
+}
+
+.b-handnav-badge {
+  border-radius: 12px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 7px;
+  color: #3a5eff;
+  background: #e6edff;
+}
+
+.b-handhistory-title {
+  color: #a0a6b2;
+  font-size: 12px;
+  margin: 8px 8px 6px;
+}
+
+.b-handhistory-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 4px;
+}
+
+.b-handhistory-item {
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  color: #1f2937;
+  text-align: left;
+  padding: 8px 10px;
+  font-size: 14px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.b-handhistory-item:hover {
+  background: #eceef2;
+}
+
+.b-handhistory-item.is-active {
+  background: #eceef2;
+}
+
+.b-handuser {
+  margin-top: 8px;
+  border: 0;
+  border-radius: 20px;
+  width: 60px;
+  height: 34px;
+  background: #edf0f4;
+  color: #525966;
+  cursor: pointer;
+}
+
+.b-handmain {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: #fff;
+}
+
+.b-handtopbar {
+  height: 56px;
+  border-bottom: 1px solid #f0f1f3;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+}
+
+.b-handmodel {
+  border: 1px solid #e7e9ef;
+  background: #fff;
+  border-radius: 7px;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+  color: #2f3642;
+  cursor: pointer;
+}
+
+.b-handchat-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 34px 0;
+}
+
+.b-handwelcome {
+  max-width: 720px;
+  margin: 126px auto 0;
+}
+
+.b-handwelcome-subtitle {
+  margin: 8px 0 24px;
+  color: #6f7785;
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.b-handquick-prompts {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.b-handprompt {
+  border: 0;
+  border-radius: 7px;
+  background: #f1f2f5;
+  color: #5f6672;
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.b-handconversation {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 4px 0 24px;
+}
+
+.b-handuser-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: 4px 0 18px;
+}
+
+.b-handuser-message {
+  max-width: 620px;
+  background: #f5f6f8;
+  border-radius: 10px;
+  color: #1f2937;
+  padding: 11px 14px;
+  line-height: 1.65;
+  font-size: 14px;
+  white-space: pre-wrap;
+}
+
+.b-handassistant-row {
+  margin-bottom: 30px;
+}
+
+.b-handassistant-status {
+  color: #9aa1ad;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.b-handassistant-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.b-handassistant-loading {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  margin-top: 2.5px;
+}
+
+.b-handassistant-text {
+  color: #151922;
+  font-size: 16px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.b-handinput-wrap {
+  padding: 0 34px 10px;
+  background: #fff;
+}
+
+.b-handinput-form {
+  max-width: 760px;
+  margin: 0 auto;
+  position: relative;
+}
+
+.b-handinput {
+  width: 100%;
+  border: 1px solid #e6e8ee;
+  border-radius: 14px;
+  padding: 14px 86px 14px 16px;
+  resize: none;
+  min-height: 94px;
+  line-height: 1.55;
+  font-size: 14px;
+  outline: none;
+}
+
+.b-handinput::placeholder {
+  color: #9ca3af;
+}
+
+.b-handinput:focus {
+  border-color: #d2d6de;
+}
+
+.b-handsend {
+  border: 0;
+  position: absolute;
+  bottom: 15px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.b-handsend {
+  right: 14px;
+  background: #8b919a;
+  color: #fff;
+  font-size: 15px;
+}
+
+.b-handsend:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.b-handdisclaimer {
+  margin-top: 8px;
+  text-align: center;
+  color: #c3c8d1;
+  font-size: 11px;
+}

@@ -1,91 +1,122 @@
-// pipeline.ts
-
-import { createSSEStream, logger } from './utils';
+import { createSSEStream, logger } from '@@browser-hand/engine-shared/util';
 import type {
   IntentionResult,
   ScannerResult,
   VectorResult,
   AbstractorResult,
   RunnerResult,
+  PipelineResult,
+  PipelineOptions,
   SSEEventType,
-  ClientType,
-} from './types';
+} from '@@browser-hand/engine-shared/type';
+import {
+  parseIntention,
+  scanPage,
+  vectorize,
+  abstract,
+  run,
+} from './layers';
 
 const log = (msg: string, meta?: unknown) => logger.info('pipeline', msg, meta);
 
-interface PipelineOptions {
-  clientType?: ClientType;
-  pageHtml?: string;
-  pageElements?: any[];
-}
-
-/**
- * 向前端发送步骤事件
- */
-function sendStream(
+function emit(
   send: (event: SSEEventType, data: unknown) => void,
-  type: 'start' | 'delta' | 'delta_done' | 'completed' | 'error',
+  type: SSEEventType,
   data: unknown,
 ) {
-  send(type as SSEEventType, data);
+  send(type, data);
+}
+
+function extractTargetUrl(intention: IntentionResult): string | null {
+  const URL_RE = /^https?:\/\/.+/i;
+
+  for (const step of intention.flow) {
+    if (['navigate', 'open', 'goto', 'visit'].includes(step.action)) {
+      if (step.target && URL_RE.test(step.target)) {
+        return step.target;
+      }
+    }
+  }
+
+  return null;
 }
 
 export async function runPipeline(
-  userInput: string,
+  question: string,
   sessionId: string,
   options: PipelineOptions = {},
 ): Promise<{
   stream: ReadableStream<Uint8Array>;
-  result: Promise<{
-    intention: IntentionResult;
-  }>;
+  result: Promise<PipelineResult>;
 }> {
   const { stream, send, close } = createSSEStream();
 
   const result = (async () => {
     try {
-      // ══════════════════════════════════════════
-      // Layer 1: Intention（流式）
-      // ══════════════════════════════════════════
-      sendStream(send, 'start', '');
+      emit(send, 'start', { sessionId });
 
-      const { parseIntention } = await import('./layers/intention');
-      const intention = await parseIntention(userInput, {
-        // 实时转发 LLM 推理过程到前端
+      emit(send, 'start', { step: 'intention' });
+      const intention = await parseIntention(question, {
         onDelta: (accumulated) => {
-          sendStream(send, 'delta', accumulated);
+          emit(send, 'delta', { step: 'intention', data: accumulated });
         },
         ondeltaDone: (content) => {
-          sendStream(send, 'delta_done', content);
-        },
-        onError: (error) => {
-          sendStream(send, 'error', error);
+          emit(send, 'delta_done', { step: 'intention', data: content });
         },
       });
+      emit(send, 'completed', { step: 'intention', data: intention });
 
-      sendStream(send, 'completed', JSON.stringify(intention));
-
-      // 检查意图是否有效
-      if (!intention.flow || intention.flow.length === 0) {
-        send('error' as SSEEventType, '无法识别用户意图');
-        send('done' as SSEEventType, JSON.stringify({ success: false, sessionId }));
-        close();
-        throw new Error('无法识别用户意图');
+      const targetUrl = extractTargetUrl(intention);
+      if (!targetUrl) {
+        throw new Error('未找到目标 URL');
       }
 
-      // ══════════════════════════════════════════
-      // 完成
-      // ══════════════════════════════════════════
-      close();
+      emit(send, 'start', { step: 'scanner' });
+      const scan: ScannerResult = await scanPage(targetUrl, {
+        pageId: 'p0',
+        timeout: 30_000,
+        onProgress: (message) => emit(send, 'delta', { step: 'scanner', message }),
+      });
+      emit(send, 'completed', { step: 'scanner', data: { url: scan.url, elements: scan.elements } });
 
-      return { intention };
+      emit(send, 'start', { step: 'vector' });
+      const vector: VectorResult = await vectorize(scan, intention, { topK: 10, minScore: 0.1 });
+      emit(send, 'completed', { step: 'vector', data: vector });
 
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      send('error' as SSEEventType, JSON.stringify({ message: msg }));
-      send('done' as SSEEventType, JSON.stringify({ success: false, sessionId }));
+      emit(send, 'start', { step: 'abstractor' });
+      const abstractor: AbstractorResult = await abstract(intention, vector);
+      for (const line of abstractor.code) {
+        emit(send, 'delta', { step: 'abstractor', data: line });
+      }
+      emit(send, 'completed', { step: 'abstractor', data: abstractor });
+
+      emit(send, 'start', { step: 'runner' });
+      const runner: RunnerResult = await run(targetUrl, abstractor, vector, {
+        headless: options.headless ?? true,
+        stepDelay: 500,
+        screenshotPerStep: false,
+        actionTimeout: 10_000,
+      });
+      emit(send, 'completed', { step: 'runner', data: runner });
+
+      const pipelineResult: PipelineResult = {
+        intention,
+        scan,
+        vector,
+        abstractor,
+        runner,
+      };
+
+      emit(send, 'done', { success: true, sessionId });
       close();
-      throw err;
+      return pipelineResult;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log('pipeline error', message);
+      emit(send, 'error', { message });
+      emit(send, 'done', { success: false, sessionId });
+      close();
+      throw error;
     }
   })();
 

@@ -1,12 +1,30 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { Chat } from '@browser-hand/ui';
+import { Chat } from './components/Chat';
 import { useTask } from './hooks/useTask';
 
 function App() {
-  const { messages, loading, handleSubmit } = useTask();
+  const {
+    sessions,
+    activeSessionId,
+    messages,
+    loading,
+    createNewSession,
+    switchSession,
+    handleSubmit,
+  } = useTask();
 
-  return <Chat onSubmit={handleSubmit} messages={messages} loading={loading} />;
+  return (
+    <Chat
+      activeSessionId={activeSessionId}
+      loading={loading}
+      messages={messages}
+      onCreateSession={createNewSession}
+      onSubmit={handleSubmit}
+      onSwitchSession={switchSession}
+      sessions={sessions}
+    />
+  );
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
