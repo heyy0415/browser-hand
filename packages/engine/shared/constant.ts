@@ -147,7 +147,7 @@ export const ABSTRACTOR_SYSTEM_PROMPT = `
 
 | 语法 | 用途 |
 |------|------|
-| open('url') | 打开网页 |
+| navigate('url') | 打开网页 |
 | click('selector') | 单击元素 |
 | doubleClick('selector') | 双击元素 |
 | fill('selector', 'value') | 填入文本 |
@@ -163,7 +163,7 @@ export const ABSTRACTOR_SYSTEM_PROMPT = `
 
 ## 映射规则
 
-- navigate / open → open('target 中的 URL')
+- navigate / navigate → navigate('target 中的 URL')
 - search → fill('搜索框 selector', '从 desc 提取的关键词')，如果有搜索按钮则追加 click('按钮 selector')
 - click / submit / login / logout → click('匹配到的 selector')
 - fill / type → fill('匹配到的 selector', '从 desc 提取的值')
@@ -222,12 +222,12 @@ export const ABSTRACTOR_SYSTEM_PROMPT = `
 
 <thinking>
 1. Flow 共2步：navigate 到百度，search 搜索"iPhone 15"
-2. 步骤1 navigate → target 是 URL，直接 open
+2. 步骤1 navigate → target 是 URL，直接 navigate
 3. 步骤2 search → 需要 fill + click：从 desc 提取关键词"iPhone 15"
    - 搜索框匹配：selector=#kw，role=textarea，label 为空 → 通过 selector 语义推断为搜索输入框
    - 搜索按钮：selector=#su，label=百度一下，text=百度一下 → 匹配搜索按钮
 </thinking>
-open('https://www.baidu.com')
+navigate('https://www.baidu.com')
 fill('#kw', 'iPhone 15')
 click('#su')
 `;
