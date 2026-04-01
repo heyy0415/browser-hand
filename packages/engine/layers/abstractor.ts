@@ -14,8 +14,9 @@ const log = (msg: string, meta?: unknown) => logger.info('abstractor', msg, meta
 
 export interface AbstractCallbacks {
   onDelta?: (delta: string) => void;
-  ondeltaDone?: (thinking: string) => void;
+  onDeltaCompleted?: (content: string) => void;
   onError?: (error: string) => void;
+  model?: string;
 }
 
 function pickElement(target: string, elements: ElementSnapshot[]): ElementSnapshot | null {
@@ -97,7 +98,16 @@ function extractThinking(content: string): string {
   const afterStart = content.slice(start + '<thinking>'.length);
   const end = afterStart.indexOf('</thinking>');
   if (end < 0) {
-    return afterStart;
+    // 处理 </thinking> 跨 delta 到达的情况
+    let text = afterStart;
+    const lastOpenAngle = text.lastIndexOf('<');
+    if (lastOpenAngle !== -1) {
+      const tail = text.slice(lastOpenAngle);
+      if ('</thinking>'.startsWith(tail)) {
+        text = text.slice(0, lastOpenAngle);
+      }
+    }
+    return text;
   }
 
   return afterStart.slice(0, end);
@@ -150,13 +160,14 @@ export async function abstract(
         content: ABSTRACTOR_USER_PROMPT({
           flow: intention,
           snapshot: {
+            title: vector.title,
             url: vector.url,
-            pageType: 'unknown',
             elements: vector.elements,
+            visibleText: vector.visibleText,
           },
         }),
       },
-    ])) {
+    ], { model: callbacks.model })) {
       accumulated += delta;
 
       const currentThinking = extractThinking(accumulated);
@@ -168,7 +179,7 @@ export async function abstract(
     }
 
     const thinking = extractThinking(accumulated).trim();
-    callbacks.ondeltaDone?.(thinking);
+    callbacks.onDeltaCompleted?.(thinking);
 
     const code = extractPseudoCode(accumulated);
     if (code.length === 0) {

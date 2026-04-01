@@ -17,8 +17,10 @@ export async function vectorize(
 ): Promise<VectorResult> {
   const result: VectorResult = {
     url: scan.url,
+    title: scan.title || '',
     matches: [],
     elements: scan.elements,
+    visibleText: scan.visibleText || [],
     success: true,
     message: 'vector 默认执行成功（透传扫描结果）',
   };

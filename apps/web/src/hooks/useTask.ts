@@ -3,15 +3,25 @@
  * 管理任务流式执行状态和多会话数据
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { submitTask } from '../services/taskApi';
 import type { SSEEvent } from '@browser-hand/engine';
 
 export interface Message {
   id: string;
   type: 'user' | 'assistant';
+  /** 思考区：仅累积 intention/abstractor 的 delta 文本 */
   content: string;
   completed?: boolean;
+  isError?: boolean;
+  /** 错误区 */
+  errorMessage?: string;
+  asking?: {
+    reply: string;
+    questions: string[];
+  };
+  /** 结果区：vector/abstractor/runner 的 completed 数据 */
+  results?: Array<{ step: string; status: string; data: unknown }>;
 }
 
 export interface SessionItem {
@@ -31,42 +41,15 @@ function createSession(initialTitle = '新会话'): SessionItem {
   };
 }
 
-function buildDeltaText(data: unknown): string {
-  if (typeof data === 'string') {
-    return data;
-  }
-  if (data === null || data === undefined) {
-    return '';
-  }
-  if (typeof data === 'object') {
-    const candidate = data as Record<string, unknown>;
-    if (typeof candidate.content === 'string') {
-      return candidate.content;
-    }
-    if (typeof candidate.text === 'string') {
-      return candidate.text;
-    }
-    return JSON.stringify(data);
-  }
-  return String(data);
-}
-
-function buildCompletedText(data: unknown): string {
-  if (typeof data === 'string') {
-    try {
-      const parsed = JSON.parse(data);
-      return JSON.stringify(parsed, null, 2);
-    } catch {
-      return data;
-    }
-  }
-  return JSON.stringify(data, null, 2);
-}
-
 export function useTask() {
   const [sessions, setSessions] = useState<SessionItem[]>([createSession()]);
   const [activeSessionId, setActiveSessionId] = useState<string>(sessions[0].id);
   const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
+  const [clarificationQuestion, setClarificationQuestion] = useState<{
+    reply: string;
+    questions: string[];
+  } | null>(null);
+  const [model, setModel] = useState('qwen-flash');
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.id === activeSessionId) ?? sessions[0],
@@ -89,30 +72,106 @@ export function useTask() {
     setActiveSessionId(sessionId);
   }, []);
 
+  /** 从 SSE event 中提取 step 名 */
+  function getStep(data: unknown): string {
+    if (typeof data === 'object' && data !== null) {
+      const obj = data as Record<string, unknown>;
+      return (obj.step as string) || 'unknown';
+    }
+    return 'unknown';
+  }
+
+  /** 构建事件处理 onEvent 回调 */
+  function buildOnEvent(assistantMessageId: string, sessionId: string) {
+    return (event: SSEEvent) => {
+      updateSession(sessionId, (session) => ({
+        ...session,
+        messages: session.messages.map((message) => {
+          if (message.id !== assistantMessageId) {
+            return message;
+          }
+
+          // ── 思考区：仅 intention 和 abstractor 的 delta ──
+          if (event.event === 'conversation_delta' || event.event === 'conversation_delta_completed') {
+            const data = event.data as { step: string; data: string };
+            if (typeof data.data !== 'string') {
+              return message;
+            }
+            if (data.step !== 'intention' && data.step !== 'abstractor') {
+              return message;
+            }
+            return {
+              ...message,
+              content: event.event === 'conversation_delta'
+                ? `${message.content}${data.data}`
+                : data.data || message.content,
+            };
+          }
+
+          // ── 结果区：各层 completed 数据 ──
+          if (event.event === 'conversation_completed') {
+            const data = event.data as { step: string; status: string; data: unknown };
+
+            if (data.step === 'intention' && data.status === 'clarification_needed') {
+              const intentionData = data.data as { reply: string; question: string[] };
+              setClarificationQuestion({
+                reply: intentionData.reply,
+                questions: intentionData.question,
+              });
+              return {
+                ...message,
+                completed: true,
+                asking: { reply: intentionData.reply, questions: intentionData.question },
+              };
+            }
+
+            return {
+              ...message,
+              completed: true,
+              results: [...(message.results || []), { step: data.step, status: data.status, data: data.data }],
+            };
+          }
+
+          // ── conversation_done ──
+          if (event.event === 'conversation_done') {
+            return { ...message, completed: true };
+          }
+
+          // ── 错误区 ──
+          if (event.event === 'error') {
+            const errorData = event.data as { step?: string; data?: string } | string;
+            const errorMsg = typeof errorData === 'string'
+              ? errorData
+              : (errorData.data ?? String(errorData));
+            return {
+              ...message,
+              isError: true,
+              errorMessage: errorMsg,
+              completed: true,
+            };
+          }
+
+          return message;
+        }),
+      }));
+    };
+  }
+
   const handleSubmit = useCallback(
     async (question: string) => {
       const text = question.trim();
-      if (!text || !activeSession) {
+      if (!text || !activeSession || loadingSessionId) {
         return;
       }
 
-      if (loadingSessionId) {
-        return;
-      }
-
-      const userMessage: Message = {
-        id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        type: 'user',
-        content: text,
-        completed: true,
-      };
-
-      const assistantMessageId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const userMessage = createMessage('user', text);
+      const assistantMessageId = createId('assistant');
       const assistantMessage: Message = {
         id: assistantMessageId,
         type: 'assistant',
         content: '',
         completed: false,
+        results: [],
       };
 
       updateSession(activeSession.id, (session) => ({
@@ -126,55 +185,16 @@ export function useTask() {
       try {
         await submitTask(text, {
           headless: false,
-          onEvent: (event: SSEEvent) => {
+          sessionId: activeSession.id,
+          model,
+          onEvent: buildOnEvent(assistantMessageId, activeSession.id),
+          onError: (error) => {
             updateSession(activeSession.id, (session) => ({
               ...session,
-              messages: session.messages.map((message) => {
-                if (message.id !== assistantMessageId) {
-                  return message;
-                }
-
-                if (event.event === 'delta') {
-                  return {
-                    ...message,
-                    content: `${message.content}${buildDeltaText(event.data)}`,
-                  };
-                }
-
-                if (event.event === 'delta_done') {
-                  return {
-                    ...message,
-                    content: buildDeltaText(event.data) || message.content,
-                  };
-                }
-
-                if (event.event === 'completed' || event.event === 'done') {
-                  return {
-                    ...message,
-                    content: buildCompletedText(event.data) || message.content,
-                    completed: true,
-                  };
-                }
-
-                if (event.event === 'error') {
-                  return {
-                    ...message,
-                    content: `error:${buildDeltaText(event.data)}`,
-                    completed: true,
-                  };
-                }
-
-                return message;
-              }),
-            }));
-          },
-          onError: (error: Error) => {
-            updateSession(activeSession.id, (session) => ({
-              ...session,
-              messages: session.messages.map((message) =>
-                message.id === assistantMessageId
-                  ? { ...message, content: `error:${error.message}`, completed: true }
-                  : message,
+              messages: session.messages.map((m) =>
+                m.id === assistantMessageId
+                  ? { ...m, errorMessage: error.message, isError: true, completed: true }
+                  : m,
               ),
             }));
             setLoadingSessionId(null);
@@ -182,8 +202,8 @@ export function useTask() {
           onComplete: () => {
             updateSession(activeSession.id, (session) => ({
               ...session,
-              messages: session.messages.map((message) =>
-                message.id === assistantMessageId ? { ...message, completed: true } : message,
+              messages: session.messages.map((m) =>
+                m.id === assistantMessageId ? { ...m, completed: true } : m,
               ),
             }));
             setLoadingSessionId(null);
@@ -193,16 +213,97 @@ export function useTask() {
         const errorMessage = error instanceof Error ? error.message : '未知错误';
         updateSession(activeSession.id, (session) => ({
           ...session,
-          messages: session.messages.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, content: `error:${errorMessage}`, completed: true }
-              : message,
+          messages: session.messages.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, errorMessage: errorMessage, isError: true, completed: true }
+              : m,
           ),
         }));
         setLoadingSessionId(null);
       }
     },
-    [activeSession, loadingSessionId, updateSession],
+    [activeSession, loadingSessionId, updateSession, model],
+  );
+
+  const handleClarification = useCallback(
+    async (selection: string) => {
+      if (!clarificationQuestion || !activeSession || loadingSessionId) {
+        return;
+      }
+
+      const text = selection.trim();
+      if (!text) {
+        return;
+      }
+
+      // 构建对话上下文：从当前会话的历史消息中提取用户提问
+      const context: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+      for (const msg of activeSession.messages) {
+        if (msg.type === 'user') {
+          context.push({ role: 'user', content: msg.content });
+        }
+      }
+
+      const userMessage = createMessage('user', text);
+      const assistantMessageId = createId('assistant');
+      const assistantMessage: Message = {
+        id: assistantMessageId,
+        type: 'assistant',
+        content: '',
+        completed: false,
+        results: [],
+      };
+
+      updateSession(activeSession.id, (session) => ({
+        ...session,
+        messages: [...session.messages, userMessage, assistantMessage],
+      }));
+
+      setClarificationQuestion(null);
+      setLoadingSessionId(activeSession.id);
+
+      try {
+        await submitTask(text, {
+          headless: false,
+          sessionId: activeSession.id,
+          context: context.length > 0 ? context : undefined,
+          model,
+          onEvent: buildOnEvent(assistantMessageId, activeSession.id),
+          onError: (error) => {
+            updateSession(activeSession.id, (session) => ({
+              ...session,
+              messages: session.messages.map((m) =>
+                m.id === assistantMessageId
+                  ? { ...m, errorMessage: error.message, isError: true, completed: true }
+                  : m,
+              ),
+            }));
+            setLoadingSessionId(null);
+          },
+          onComplete: () => {
+            updateSession(activeSession.id, (session) => ({
+              ...session,
+              messages: session.messages.map((m) =>
+                m.id === assistantMessageId ? { ...m, completed: true } : m,
+              ),
+            }));
+            setLoadingSessionId(null);
+          },
+        });
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : '未知错误';
+        updateSession(activeSession.id, (session) => ({
+          ...session,
+          messages: session.messages.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, errorMessage: errorMessage, isError: true, completed: true }
+              : m,
+          ),
+        }));
+        setLoadingSessionId(null);
+      }
+    },
+    [clarificationQuestion, activeSession, loadingSessionId, updateSession, model],
   );
 
   return {
@@ -210,8 +311,27 @@ export function useTask() {
     activeSessionId,
     messages: activeSession?.messages ?? [],
     loading: loadingSessionId === activeSessionId,
+    clarificationQuestion,
+    model,
+    setModel,
     createNewSession,
     switchSession,
     handleSubmit,
+    handleClarification,
+  };
+}
+
+// ── 内部工具函数 ─────────────────────────────────────────────────
+
+function createId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function createMessage(type: 'user' | 'assistant', content: string): Message {
+  return {
+    id: createId(type),
+    type,
+    content,
+    completed: true,
   };
 }

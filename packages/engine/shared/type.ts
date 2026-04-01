@@ -6,8 +6,13 @@ export interface IntentionStep {
   desc: string;
 }
 
+export type IntentionStatus = 'success' | 'clarification_needed' | 'out_of_scope';
+
 export interface IntentionResult {
-  flow: IntentionStep[];
+  status: IntentionStatus;
+  reply: string | null;
+  flow: IntentionStep[] | null;
+  question: string[] | null;
 }
 
 export type SemanticRole =
@@ -46,13 +51,21 @@ export interface ElementSnapshot {
   label: string;
   state: Record<string, unknown>;
   framePath: string[];
-  text?: string;
-  rect?: ElementRect;
+  text: string;
+  rect: ElementRect;
+}
+
+/** 页面可见文本节点（标题、段落、图片等非交互元素） */
+export interface VisibleTextNode {
+  tag: string;
+  text: string;
 }
 
 export interface ScannerResult {
   url: string;
+  title: string;
   elements: ElementSnapshot[];
+  visibleText: VisibleTextNode[];
 }
 
 export interface ScanOptions {
@@ -70,8 +83,10 @@ export interface VectorMatch {
 
 export interface VectorResult {
   url: string;
+  title: string;
   matches: VectorMatch[];
   elements: ElementSnapshot[];
+  visibleText: VisibleTextNode[];
   success: boolean;
   message: string;
 }
@@ -138,12 +153,11 @@ export interface RunnerOptions {
 }
 
 export const SSE_EVENT_TYPES = [
-  'start',
-  'delta',
-  'delta_done',
-  'completed',
-  'action',
-  'done',
+  'conversation_start',
+  'conversation_delta',
+  'conversation_delta_completed',
+  'conversation_completed',
+  'conversation_done',
   'error',
 ] as const;
 
@@ -164,4 +178,6 @@ export interface PipelineResult {
 
 export interface PipelineOptions {
   headless?: boolean;
+  context?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  model?: string;
 }

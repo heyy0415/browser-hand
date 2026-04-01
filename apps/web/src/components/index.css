@@ -193,15 +193,21 @@ textarea {
   padding: 0 20px;
 }
 
-.b-handmodel {
+.b-handmodel-select {
   border: 1px solid #e7e9ef;
   background: #fff;
   border-radius: 7px;
   height: 30px;
-  padding: 0 12px;
+  padding: 0 10px;
   font-size: 13px;
   color: #2f3642;
   cursor: pointer;
+  outline: none;
+  appearance: auto;
+}
+
+.b-handmodel-select:focus {
+  border-color: #c2c7d0;
 }
 
 .b-handchat-area {
@@ -296,6 +302,87 @@ textarea {
   white-space: pre-wrap;
 }
 
+.b-handassistant-error {
+  color: #e03131;
+  font-size: 14px;
+}
+
+/* ── 区域2：执行结果区 ────────────────────────────────── */
+
+.b-handresults-area {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.b-handresult-block {
+  padding: 10px 14px;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border: 1px solid #e9ecef;
+  font-size: 13px;
+}
+
+.b-handresult-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.b-handresult-label {
+  font-weight: 600;
+  color: #495057;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.b-handresult-status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+
+.b-handresult-status.is-success {
+  color: #2b8a3e;
+  background: #d3f9d8;
+}
+
+.b-handresult-status.is-error {
+  color: #c92a2a;
+  background: #ffe3e3;
+}
+
+.b-handresult-json {
+  margin: 0;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #495057;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* ── 区域3：错误区 ────────────────────────────────────── */
+
+.b-handerror-area {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: #fff5f5;
+  border: 1px solid #ffc9c9;
+  border-radius: 8px;
+  color: #c92a2a;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .b-handinput-wrap {
   padding: 0 34px 10px;
   background: #fff;
@@ -356,4 +443,88 @@ textarea {
   text-align: center;
   color: #c3c8d1;
   font-size: 11px;
+}
+
+/* 全局澄清问题弹窗 */
+.b-handclarification-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  animation: fadeIn 0.2s ease;
+}
+
+.b-handclarification-modal {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 480px;
+  width: 90%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+  animation: slideUp 0.3s ease;
+}
+
+.b-handclarification-modal-text {
+  margin: 0 0 20px 0;
+  color: #4a5568;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.b-handclarification-modal-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.b-handclarification-modal-button {
+  border: 1px solid #d1d5db;
+  background: #fff;
+  border-radius: 8px;
+  padding: 10px 18px;
+  font-size: 14px;
+  color: #374151;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex: 1 1 calc(50% - 5px);
+  min-width: 120px;
+}
+
+.b-handclarification-modal-button:hover {
+  background: #f3f4f6;
+  border-color: #9ca3af;
+  color: #111827;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.b-handclarification-modal-button:active {
+  background: #e5e7eb;
+  transform: translateY(0);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

@@ -10,6 +10,9 @@ const TASK_API_URL = API_BASE_URL ? `${API_BASE_URL}/api/task` : '/api/task';
 
 export interface TaskStreamOptions {
   headless?: boolean;
+  sessionId?: string;
+  model?: string;
+  context?: Array<{ role: 'user' | 'assistant'; content: string }>;
   onEvent: (event: SSEEvent) => void;
   onError: (error: Error) => void;
   onComplete: () => void;
@@ -25,7 +28,10 @@ export async function submitTask(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         question,
-        headless: options.headless
+        headless: options.headless,
+        sessionId: options.sessionId,
+        model: options.model,
+        context: options.context,
       }),
     });
 
@@ -76,14 +82,7 @@ export async function submitTask(
 
           try {
             const parsed = JSON.parse(data);
-            const normalizedData =
-              typeof parsed === 'string'
-                ? parsed
-                : typeof parsed?.data === 'string'
-                  ? parsed.data
-                  : parsed;
-
-            options.onEvent({ event: currentEvent as SSEEvent['event'], data: normalizedData });
+            options.onEvent({ event: currentEvent as SSEEvent['event'], data: parsed });
           } catch {
             options.onEvent({ event: currentEvent as SSEEvent['event'], data });
           }
