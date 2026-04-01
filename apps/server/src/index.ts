@@ -22,20 +22,25 @@ app.post('/api/task', async (c) => {
   const body = await c.req.json<{
     question: string;
     headless?: boolean;
+    sessionId?: string;
+    model?: string;
+    context?: Array<{ role: 'user' | 'assistant'; content: string }>;
   }>();
-  const { question, headless } = body;
+  const { question, headless, sessionId, model, context } = body;
 
   if (!question) {
     return c.json({ error: 'question 是必需的' }, 400);
   }
 
-  const sessionId = crypto.randomUUID();
-  log('new task', { sessionId, question });
+  const id = sessionId || crypto.randomUUID();
+  log('new task', { sessionId: id, question, hasContext: !!context });
 
   return streamSSE(c, async (stream) => {
     try {
-      const { stream: pipelineStream, result } = await runPipeline(question, sessionId, {
-        headless
+      const { stream: pipelineStream, result } = await runPipeline(question, id, {
+        headless,
+        context,
+        model,
       });
 
       const reader = pipelineStream.getReader();

@@ -281,7 +281,7 @@ const EXTRACTION_SCRIPT = `
     return s;
   }
 
-  // ── 主扫描 ────────────────────────────────────
+  // ── 主扫描（可交互元素） ─────────────────────
   var SELECTORS = [
     'a[href]', 'button', 'input', 'textarea', 'select',
     '[role="button"]', '[role="link"]', '[role="textbox"]',
@@ -308,18 +308,54 @@ const EXTRACTION_SCRIPT = `
       if (!isInteractive(el)) continue;
 
       var rect = el.getBoundingClientRect();
+      var rawText = (el.textContent || '').trim().replace(/\\s+/g, ' ');
       elements.push({
         tag: el.tagName.toLowerCase(),
         role: getRole(el),
         selector: makeSelector(el),
         label: getLabel(el),
+        text: rawText.substring(0, 120),
         state: getState(el),
-        rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+        rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
       });
     }
   }
 
-  return elements;
+  // ── 可见文本扫描（非交互元素，提供页面内容上下文） ──
+  var VISIBLE_SELECTORS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'blockquote'];
+  var visibleText = [];
+  for (var vi = 0; vi < VISIBLE_SELECTORS.length; vi++) {
+    var vnodes;
+    try { vnodes = document.querySelectorAll(VISIBLE_SELECTORS[vi]); } catch(e) { continue; }
+    for (var vj = 0; vj < vnodes.length; vj++) {
+      var vel = vnodes[vj];
+      if (seen.has(vel)) continue;
+      if (!isVisible(vel)) continue;
+      var vtxt = (vel.textContent || '').trim().replace(/\\s+/g, ' ');
+      if (vtxt.length > 2 && vtxt.length < 300) {
+        visibleText.push({
+          tag: vel.tagName.toLowerCase(),
+          text: vtxt.substring(0, 150),
+        });
+        if (visibleText.length >= 50) break;
+      }
+    }
+    if (visibleText.length >= 50) break;
+  }
+
+  // img 元素
+  var imgs;
+  try { imgs = document.querySelectorAll('img'); } catch(e) { imgs = []; }
+  for (var ii = 0; ii < imgs.length && visibleText.length < 50; ii++) {
+    var img = imgs[ii];
+    if (!isVisible(img)) continue;
+    var alt = (img.getAttribute('alt') || '').trim();
+    if (alt.length > 0 && alt.length < 200) {
+      visibleText.push({ tag: 'img', text: alt });
+    }
+  }
+
+  return { elements: elements, visibleText: visibleText };
 })();
 `;
 
@@ -350,7 +386,7 @@ const EXTRACTION_SCRIPT = `
 
     // ── 导航 ──
     log('progress', `navigating to ${URL}`);
-    await page.goto(URL, { waitUntil: 'networkidle', timeout: TIMEOUT });
+    await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
 
     // ── 等待动态渲染 ──
     log('progress', 'waiting for dynamic content');
@@ -379,27 +415,34 @@ const EXTRACTION_SCRIPT = `
     // ── 扫描所有帧 ──
     log('progress', 'scanning elements');
     const allElements = [];
+    const allVisibleText = [];
     let globalIndex = 0;
 
     async function scanFrame(frame, framePath) {
-      let elements = [];
+      let result;
       try {
-        elements = await frame.evaluate(EXTRACTION_SCRIPT);
+        result = await frame.evaluate(EXTRACTION_SCRIPT);
       } catch (e) {
         err(`[frame ${framePath.join('.')}]: ${e.message}`);
         return;
       }
 
-      for (const el of elements) {
+      for (const el of (result.elements || [])) {
         allElements.push({
           uid: `${PAGE_ID}:${framePath.join(':')}:${globalIndex++}`,
           tag: el.tag,
           role: el.role,
           label: el.label,
+          text: el.text || '',
           selector: el.selector,
           state: el.state,
+          rect: el.rect,
           framePath: [...framePath],
         });
+      }
+
+      for (const vt of (result.visibleText || [])) {
+        allVisibleText.push({ tag: vt.tag, text: vt.text });
       }
 
       // 递归子帧
@@ -429,25 +472,33 @@ const EXTRACTION_SCRIPT = `
 
     for (const { frame, path } of frameList) {
       if (scannedSet.has(path.join('.'))) continue;
-      let elements = [];
-      try { elements = await frame.evaluate(EXTRACTION_SCRIPT); } catch { continue; }
-      for (const el of elements) {
+      let result;
+      try { result = await frame.evaluate(EXTRACTION_SCRIPT); } catch { continue; }
+      for (const el of (result.elements || [])) {
         allElements.push({
           uid: `${PAGE_ID}:${path.join(':')}:${globalIndex++}`,
           tag: el.tag,
           role: el.role,
           label: el.label,
+          text: el.text || '',
           selector: el.selector,
           state: el.state,
+          rect: el.rect,
           framePath: [...path],
         });
+      }
+      for (const vt of (result.visibleText || [])) {
+        allVisibleText.push({ tag: vt.tag, text: vt.text });
       }
     }
 
     // ── 输出结果 ──
+    const pageTitle = await page.title().catch(() => '');
     const result = {
       url: URL,
+      title: pageTitle,
       elements: allElements,
+      visibleText: allVisibleText,
     };
 
     log('progress', `found ${allElements.length} elements`);

@@ -9,9 +9,13 @@ function App() {
     activeSessionId,
     messages,
     loading,
+    clarificationQuestion,
+    model,
+    setModel,
     createNewSession,
     switchSession,
     handleSubmit,
+    handleClarification,
   } = useTask();
 
   return (
@@ -19,6 +23,10 @@ function App() {
       activeSessionId={activeSessionId}
       loading={loading}
       messages={messages}
+      clarificationQuestion={clarificationQuestion}
+      model={model}
+      onClarificationSelect={handleClarification}
+      onModelChange={setModel}
       onCreateSession={createNewSession}
       onSubmit={handleSubmit}
       onSwitchSession={switchSession}

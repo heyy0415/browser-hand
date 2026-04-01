@@ -17,8 +17,10 @@ export async function vectorize(
 ): Promise<VectorResult> {
   const result: VectorResult = {
     url: scan.url,
+    title: scan.title || '',
     matches: [],
     elements: scan.elements,
+    visibleText: scan.visibleText || [],
     success: true,
     message: 'vector 默认执行成功（透传扫描结果）',
   };
@@ -35,10 +37,10 @@ export async function processVector(
   const { stream, send, close } = createSSEStream();
 
   const result = (async () => {
-    send('start', { step: 'vector' });
+    send('conversation_start', { step: 'vector' });
     const vectorResult = await vectorize(scan, intention, options);
-    send('completed', { step: 'vector', data: vectorResult });
-    send('done', { success: true });
+    send('conversation_completed', { step: 'vector', data: vectorResult });
+    send('conversation_done', { success: true });
     close();
     return vectorResult;
   })();

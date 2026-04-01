@@ -1,4 +1,8 @@
-import { logger } from '@@browser-hand/engine-shared/util';
+import {
+  ABSTRACTOR_SYSTEM_PROMPT,
+  ABSTRACTOR_USER_PROMPT,
+} from '@@browser-hand/engine-shared/constant';
+import { logger, streamLLM } from '@@browser-hand/engine-shared/util';
 import type {
   VectorResult,
   AbstractorResult,
@@ -7,6 +11,13 @@ import type {
 } from '@@browser-hand/engine-shared/type';
 
 const log = (msg: string, meta?: unknown) => logger.info('abstractor', msg, meta);
+
+export interface AbstractCallbacks {
+  onDelta?: (delta: string) => void;
+  onDeltaCompleted?: (content: string) => void;
+  onError?: (error: string) => void;
+  model?: string;
+}
 
 function pickElement(target: string, elements: ElementSnapshot[]): ElementSnapshot | null {
   if (!target) {
@@ -45,7 +56,7 @@ function toPseudoCode(
     case 'open':
     case 'goto':
     case 'visit':
-      return `navigate('${target}')`;
+      return `open('${target}')`;
     case 'click':
     case 'submit':
     case 'login':
@@ -71,8 +82,6 @@ function toPseudoCode(
       return `uncheck('${selector}')`;
     case 'scroll':
       return `scrollDown()`;
-    case 'screenshot':
-      return `screenshot('step')`;
     case 'extract':
       return `getText('${selector}')`;
     default:
@@ -80,20 +89,52 @@ function toPseudoCode(
   }
 }
 
-export async function abstract(
-  intention: IntentionResult,
-  vector: VectorResult,
-): Promise<AbstractorResult> {
+function extractThinking(content: string): string {
+  const start = content.indexOf('<thinking>');
+  if (start < 0) {
+    return '';
+  }
+
+  const afterStart = content.slice(start + '<thinking>'.length);
+  const end = afterStart.indexOf('</thinking>');
+  if (end < 0) {
+    // 处理 </thinking> 跨 delta 到达的情况
+    let text = afterStart;
+    const lastOpenAngle = text.lastIndexOf('<');
+    if (lastOpenAngle !== -1) {
+      const tail = text.slice(lastOpenAngle);
+      if ('</thinking>'.startsWith(tail)) {
+        text = text.slice(0, lastOpenAngle);
+      }
+    }
+    return text;
+  }
+
+  return afterStart.slice(0, end);
+}
+
+function extractPseudoCode(content: string): string[] {
+  const endTag = '</thinking>';
+  const endIndex = content.indexOf(endTag);
+  const body = endIndex >= 0 ? content.slice(endIndex + endTag.length) : content;
+
+  return body
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^[a-zA-Z][a-zA-Z0-9]*\(/.test(line));
+}
+
+function fallbackAbstract(intention: IntentionResult, vector: VectorResult): AbstractorResult {
   const code: string[] = [];
 
-  for (const step of intention.flow) {
+  for (const step of intention.flow ?? []) {
     const picked = pickElement(step.target, vector.elements);
     code.push(toPseudoCode(step.action, step.target, step.desc, picked));
   }
 
   const complexity = code.length <= 2 ? 'low' : code.length <= 5 ? 'medium' : 'high';
 
-  const result: AbstractorResult = {
+  return {
     code,
     summary: code.join(' -> '),
     meta: {
@@ -101,7 +142,68 @@ export async function abstract(
       estimatedComplexity: complexity,
     },
   };
+}
 
-  log('done', { steps: code.length });
-  return result;
+export async function abstract(
+  intention: IntentionResult,
+  vector: VectorResult,
+  callbacks: AbstractCallbacks = {},
+): Promise<AbstractorResult> {
+  try {
+    let accumulated = '';
+    let sentThinkingLength = 0;
+
+    for await (const delta of streamLLM([
+      { role: 'system', content: ABSTRACTOR_SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: ABSTRACTOR_USER_PROMPT({
+          flow: intention,
+          snapshot: {
+            title: vector.title,
+            url: vector.url,
+            elements: vector.elements,
+            visibleText: vector.visibleText,
+          },
+        }),
+      },
+    ], { model: callbacks.model })) {
+      accumulated += delta;
+
+      const currentThinking = extractThinking(accumulated);
+      if (currentThinking.length > sentThinkingLength) {
+        const thinkingDelta = currentThinking.slice(sentThinkingLength);
+        sentThinkingLength = currentThinking.length;
+        callbacks.onDelta?.(thinkingDelta);
+      }
+    }
+
+    const thinking = extractThinking(accumulated).trim();
+    callbacks.onDeltaCompleted?.(thinking);
+
+    const code = extractPseudoCode(accumulated);
+    if (code.length === 0) {
+      throw new Error('LLM 响应中未找到可执行伪代码');
+    }
+
+    const complexity = code.length <= 2 ? 'low' : code.length <= 5 ? 'medium' : 'high';
+
+    const result: AbstractorResult = {
+      code,
+      summary: code.join(' -> '),
+      thinking,
+      meta: {
+        totalSteps: code.length,
+        estimatedComplexity: complexity,
+      },
+    };
+
+    log('done', { steps: code.length });
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    callbacks.onError?.(message);
+    log('fallback', message);
+    return fallbackAbstract(intention, vector);
+  }
 }
