@@ -1,10 +1,11 @@
-import { createSSEStream, logger } from '@@browser-hand/engine-shared/util';
+import { createSSEStream } from '@@browser-hand/engine-shared/util';
 import type {
   IntentionResult,
   ScannerResult,
   VectorResult,
   AbstractorResult,
   RunnerResult,
+  PipelineResult,
   PipelineOptions,
   SSEEventType,
 } from '@@browser-hand/engine-shared/type';
@@ -15,8 +16,6 @@ import {
   abstract,
   run,
 } from './layers';
-
-const log = (msg: string, meta?: unknown) => logger.info('pipeline', msg, meta);
 
 type Emit = (event: SSEEventType, data: unknown) => void;
 
@@ -63,6 +62,19 @@ export async function runPipeline(
       context: options.context,
       model: options.model,
     });
+
+    if (!intention) {
+      emit('error', { step: 'intention', data: '意图解析失败：未返回有效结果' });
+      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId, error: '意图解析失败' } });
+      close();
+      return {
+        intention: { status: 'out_of_scope', reply: '意图解析失败', flow: null, question: null },
+        scan: null as never,
+        vector: null as never,
+        abstractor: null as never,
+        runner: null as never,
+      };
+    }
 
     emit('conversation_completed', {
       step: 'intention',

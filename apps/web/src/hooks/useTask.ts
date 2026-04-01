@@ -3,7 +3,7 @@
  * 管理任务流式执行状态和多会话数据
  */
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { submitTask } from '../services/taskApi';
 import type { SSEEvent } from '@browser-hand/engine';
 
@@ -71,15 +71,6 @@ export function useTask() {
   const switchSession = useCallback((sessionId: string) => {
     setActiveSessionId(sessionId);
   }, []);
-
-  /** 从 SSE event 中提取 step 名 */
-  function getStep(data: unknown): string {
-    if (typeof data === 'object' && data !== null) {
-      const obj = data as Record<string, unknown>;
-      return (obj.step as string) || 'unknown';
-    }
-    return 'unknown';
-  }
 
   /** 构建事件处理 onEvent 回调 */
   function buildOnEvent(assistantMessageId: string, sessionId: string) {

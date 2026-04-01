@@ -127,7 +127,7 @@ function extractPseudoCode(content: string): string[] {
 function fallbackAbstract(intention: IntentionResult, vector: VectorResult): AbstractorResult {
   const code: string[] = [];
 
-  for (const step of intention.flow) {
+  for (const step of intention.flow ?? []) {
     const picked = pickElement(step.target, vector.elements);
     code.push(toPseudoCode(step.action, step.target, step.desc, picked));
   }
