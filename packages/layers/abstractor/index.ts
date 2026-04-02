@@ -1,14 +1,11 @@
+/** Abstractor 层 — 将意图和筛选后的元素抽象为可执行伪代码 */
+
 import {
   ABSTRACTOR_SYSTEM_PROMPT,
   ABSTRACTOR_USER_PROMPT,
-} from '@@browser-hand/engine-shared/constant';
-import { logger, streamLLM } from '@@browser-hand/engine-shared/util';
-import type {
-  VectorResult,
-  AbstractorResult,
-  IntentionResult,
-  ElementSnapshot,
-} from '@@browser-hand/engine-shared/type';
+} from '../../utils/constant';
+import { logger, streamLLM } from '../../utils/util';
+import type { VectorResult, AbstractorResult, IntentionResult } from '../../utils/type';
 
 const log = (msg: string, meta?: unknown) => logger.info('abstractor', msg, meta);
 
@@ -19,81 +16,9 @@ export interface AbstractCallbacks {
   model?: string;
 }
 
-function pickElement(target: string, elements: ElementSnapshot[]): ElementSnapshot | null {
-  if (!target) {
-    return elements[0] ?? null;
-  }
-
-  const lowerTarget = target.toLowerCase();
-  for (const element of elements) {
-    const hitText = `${element.label} ${element.selector} ${element.tag} ${element.role}`.toLowerCase();
-    if (hitText.includes(lowerTarget)) {
-      return element;
-    }
-  }
-
-  return elements[0] ?? null;
-}
-
-function extractQuotedValue(desc: string): string {
-  const m = desc.match(/["“”'‘’]([^"“”'‘’]+)["“”'‘’]/);
-  if (m?.[1]) {
-    return m[1];
-  }
-  return '';
-}
-
-function toPseudoCode(
-  action: string,
-  target: string,
-  desc: string,
-  picked: ElementSnapshot | null,
-): string {
-  const selector = picked?.selector || target;
-
-  switch (action) {
-    case 'navigate':
-    case 'open':
-    case 'goto':
-    case 'visit':
-      return `open('${target}')`;
-    case 'click':
-    case 'submit':
-    case 'login':
-    case 'logout':
-    case 'sort':
-    case 'filter':
-      return `click('${selector}')`;
-    case 'doubleclick':
-      return `doubleClick('${selector}')`;
-    case 'fill':
-    case 'type':
-    case 'search': {
-      const value = extractQuotedValue(desc) || target;
-      return `fill('${selector}', '${value}')`;
-    }
-    case 'select': {
-      const value = extractQuotedValue(desc) || target;
-      return `select('${selector}', '${value}')`;
-    }
-    case 'check':
-      return `check('${selector}')`;
-    case 'uncheck':
-      return `uncheck('${selector}')`;
-    case 'scroll':
-      return `scrollDown()`;
-    case 'extract':
-      return `getText('${selector}')`;
-    default:
-      return `click('${selector}')`;
-  }
-}
-
 function extractThinking(content: string): string {
   const start = content.indexOf('<thinking>');
-  if (start < 0) {
-    return '';
-  }
+  if (start < 0) return '';
 
   const afterStart = content.slice(start + '<thinking>'.length);
   const end = afterStart.indexOf('</thinking>');
@@ -101,11 +26,8 @@ function extractThinking(content: string): string {
     // 处理 </thinking> 跨 delta 到达的情况
     let text = afterStart;
     const lastOpenAngle = text.lastIndexOf('<');
-    if (lastOpenAngle !== -1) {
-      const tail = text.slice(lastOpenAngle);
-      if ('</thinking>'.startsWith(tail)) {
-        text = text.slice(0, lastOpenAngle);
-      }
+    if (lastOpenAngle !== -1 && '</thinking>'.startsWith(text.slice(lastOpenAngle))) {
+      text = text.slice(0, lastOpenAngle);
     }
     return text;
   }
@@ -127,9 +49,42 @@ function extractPseudoCode(content: string): string[] {
 function fallbackAbstract(intention: IntentionResult, vector: VectorResult): AbstractorResult {
   const code: string[] = [];
 
+  // 使用 Vector 层匹配的元素生成伪代码
   for (const step of intention.flow ?? []) {
-    const picked = pickElement(step.target, vector.elements);
-    code.push(toPseudoCode(step.action, step.target, step.desc, picked));
+    const match = vector.matches.find((m) => m.matchedStep === intention.flow!.indexOf(step));
+
+    if (step.action === 'navigate') {
+      code.push(`open('${step.target}')`);
+    } else if (match) {
+      const selector = match.element.selector;
+      switch (step.action) {
+        case 'click':
+          code.push(`click('${selector}')`);
+          break;
+        case 'fill':
+          code.push(`fill('${selector}', '${step.value || ''}')`);
+          break;
+        case 'select':
+          code.push(`select('${selector}', '${step.value || ''}')`);
+          break;
+        case 'check':
+          code.push(`check('${selector}')`);
+          break;
+        case 'uncheck':
+          code.push(`uncheck('${selector}')`);
+          break;
+        case 'extract':
+          code.push(`getText('${selector}')`);
+          break;
+        case 'scroll':
+          code.push('scrollDown()');
+          break;
+        default:
+          code.push(`click('${selector}')`);
+      }
+    } else if (step.action === 'scroll') {
+      code.push('scrollDown()');
+    }
   }
 
   const complexity = code.length <= 2 ? 'low' : code.length <= 5 ? 'medium' : 'high';
@@ -164,6 +119,8 @@ export async function abstract(
             url: vector.url,
             elements: vector.elements,
             visibleText: vector.visibleText,
+            capabilities: vector.capabilities,
+            groupedElements: vector.groupedElements,
           },
         }),
       },
@@ -172,9 +129,8 @@ export async function abstract(
 
       const currentThinking = extractThinking(accumulated);
       if (currentThinking.length > sentThinkingLength) {
-        const thinkingDelta = currentThinking.slice(sentThinkingLength);
+        callbacks.onDelta?.(currentThinking.slice(sentThinkingLength));
         sentThinkingLength = currentThinking.length;
-        callbacks.onDelta?.(thinkingDelta);
       }
     }
 
@@ -188,7 +144,9 @@ export async function abstract(
 
     const complexity = code.length <= 2 ? 'low' : code.length <= 5 ? 'medium' : 'high';
 
-    const result: AbstractorResult = {
+    log('done', { steps: code.length });
+
+    return {
       code,
       summary: code.join(' -> '),
       thinking,
@@ -197,9 +155,6 @@ export async function abstract(
         estimatedComplexity: complexity,
       },
     };
-
-    log('done', { steps: code.length });
-    return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     callbacks.onError?.(message);

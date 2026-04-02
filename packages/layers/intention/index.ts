@@ -1,6 +1,6 @@
-import { INTENT_SYSTEM_PROMPT, INTENT_USER_PROMPT } from '@@browser-hand/engine-shared/constant';
-import { logger, parseJSON, streamLLM } from '@@browser-hand/engine-shared/util';
-import type { IntentionResult } from '@@browser-hand/engine-shared/type';
+import { INTENT_SYSTEM_PROMPT, INTENT_USER_PROMPT } from '../../utils/constant';
+import { logger, parseJSON, streamLLM } from '../../utils/util';
+import type { IntentionResult } from '../../utils/type';
 
 const log = (msg: string, meta?: unknown) => logger.info('intention', msg, meta);
 

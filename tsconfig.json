@@ -16,8 +16,7 @@
     "baseUrl": ".",
     "ignoreDeprecations": "6.0",
     "paths": {
-      "@browser-hand/engine": ["packages/engine/index.ts"],
-      "@@browser-hand/engine-shared/*": ["packages/engine/shared/*"]
+      "@browser-hand/engine": ["packages/index.ts"]
     }
   },
   "include": ["packages/**/*", "apps/**/*"],

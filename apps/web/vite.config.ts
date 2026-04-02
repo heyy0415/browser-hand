@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@browser-hand/engine': path.resolve(__dirname, '../../packages/engine'),
+      '@browser-hand/engine': path.resolve(__dirname, '../../packages'),
     },
   },
   server: {

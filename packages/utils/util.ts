@@ -1,8 +1,8 @@
 /** engine-shared 工具方法 */
 
 import OpenAI from 'openai';
-import { LLM_CONFIG } from '@@browser-hand/engine-shared/constant';
-import type { SSEEventType } from '@@browser-hand/engine-shared/type';
+import { LLM_CONFIG } from './constant';
+import type { SSEEventType } from './type';
 
 export function createLLM() {
   return new OpenAI({

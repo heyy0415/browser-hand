@@ -3,7 +3,7 @@
  * 负责与后端 /api/task 接口通信，处理流式 SSE 响应
  */
 
-import type { SSEEvent } from '@browser-hand/engine';
+import type { SSEEvent } from 'packages';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL?.trim();
 const TASK_API_URL = API_BASE_URL ? `${API_BASE_URL}/api/task` : '/api/task';

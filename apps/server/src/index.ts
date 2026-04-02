@@ -4,8 +4,8 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
-import { runPipeline } from '@browser-hand/engine';
-import { logger } from '@@browser-hand/engine-shared/util';
+import { runPipeline } from 'packages';
+import { logger } from 'packages/utils/util';
 
 const log = (msg: string, meta?: unknown) => logger.info('server', msg, meta);
 const PORT = Number(process.env.PORT) || 3000;

@@ -6,6 +6,6 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["src", "layers", "shared"],
+  "include": ["layers", "utils", "*.ts"],
   "exclude": ["node_modules", "dist"]
 }
