@@ -5,7 +5,7 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { submitTask } from '../services/taskApi';
-import type { SSEEvent } from '@browser-hand/engine';
+import type { SSEEvent } from 'packages';
 
 export interface Message {
   id: string;

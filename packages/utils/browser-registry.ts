@@ -1,7 +1,7 @@
 /** 浏览器实例注册表 — 按 sessionId 复用浏览器，pipeline 执行完毕后不关闭 */
 
 import { chromium, type Browser } from 'playwright';
-import { logger } from '@@browser-hand/engine-shared/util';
+import { logger } from './util';
 
 const log = (msg: string, meta?: unknown) => logger.info('browser-registry', msg, meta);
 

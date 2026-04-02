@@ -281,6 +281,271 @@ const EXTRACTION_SCRIPT = `
     return s;
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // 新增：语义特征提取
+  // ═══════════════════════════════════════════════════════════
+
+  // ── 功能区域检测 ───────────────────────────────
+  function detectFunctionalZone(el) {
+    var tag = el.tagName.toLowerCase();
+    var rect = el.getBoundingClientRect();
+    var viewWidth = window.innerWidth;
+    var viewHeight = window.innerHeight;
+
+    // 通过语义化标签检测
+    var semanticParent = el.closest('nav, header, footer, main, aside, article, section, form, dialog, [role="dialog"], [role="navigation"], [role="search"], [role="main"]');
+    if (semanticParent) {
+      var parentTag = semanticParent.tagName.toLowerCase();
+      var parentRole = semanticParent.getAttribute('role') || '';
+      if (parentTag === 'nav' || parentRole === 'navigation') return 'navigation';
+      if (parentTag === 'header') return 'header';
+      if (parentTag === 'footer') return 'footer';
+      if (parentTag === 'main' || parentRole === 'main') return 'main-content';
+      if (parentTag === 'aside') return 'sidebar';
+      if (parentTag === 'form' || parentRole === 'search') return 'form';
+      if (parentTag === 'dialog' || parentRole === 'dialog') return 'modal';
+    }
+
+    // 通过 class/id 检测常见模式
+    var classStr = (el.className || '').toLowerCase();
+    var idStr = (el.id || '').toLowerCase();
+    var combined = classStr + ' ' + idStr;
+
+    if (/\\b(nav|menu|navbar|topbar|header)\\b/.test(combined)) return 'navigation';
+    if (/\\b(search|searchbar|search-box)\\b/.test(combined)) return 'search';
+    if (/\\b(sidebar|aside|side-nav)\\b/.test(combined)) return 'sidebar';
+    if (/\\b(footer|bottom)\\b/.test(combined)) return 'footer';
+    if (/\\b(modal|popup|dialog|overlay)\\b/.test(combined)) return 'modal';
+    if (/\\b(form|login|register|signup)\\b/.test(combined)) return 'form';
+    if (/\\b(list|items|results)\\b/.test(combined)) return 'list';
+    if (/\\b(card|item|product)\\b/.test(combined)) return 'card';
+
+    // 通过位置检测
+    if (rect.top < 100 && rect.height < 80) return 'header';
+    if (rect.top > viewHeight - 150) return 'footer';
+    if (rect.left < 50 && rect.width < 300 && rect.height > 200) return 'sidebar';
+    if (rect.left > viewWidth - 300 && rect.width < 300 && rect.height > 200) return 'sidebar';
+
+    return 'unknown';
+  }
+
+  // ── 交互类型推断 ───────────────────────────────
+  function inferInteractionHint(el) {
+    var tag = el.tagName.toLowerCase();
+    var type = (el.getAttribute('type') || '').toLowerCase();
+    var role = el.getAttribute('role') || '';
+    var label = (el.getAttribute('aria-label') || el.textContent || '').toLowerCase();
+    var classStr = (el.className || '').toLowerCase();
+
+    // 提交类按钮
+    if (type === 'submit' || /\\b(submit|confirm|save|ok|确定|提交|保存)\\b/.test(label + ' ' + classStr)) {
+      return 'submit';
+    }
+
+    // 取消类按钮
+    if (/\\b(cancel|close|dismiss|back|取消|关闭|返回)\\b/.test(label + ' ' + classStr)) {
+      return 'cancel';
+    }
+
+    // 导航类
+    if (tag === 'a' && el.getAttribute('href') && !el.getAttribute('href').startsWith('#')) {
+      return 'navigation';
+    }
+
+    // 输入类
+    if (['input', 'textarea'].indexOf(tag) !== -1 && !['submit', 'button', 'reset'].includes(type)) {
+      return 'input';
+    }
+
+    // 选择类
+    if (tag === 'select' || ['checkbox', 'radio'].indexOf(type) !== -1 || ['checkbox', 'radio', 'combobox', 'listbox'].indexOf(role) !== -1) {
+      return 'selection';
+    }
+
+    // 切换类
+    if (['switch', 'toggle'].indexOf(role) !== -1 || /\\b(toggle|switch)\\b/.test(classStr)) {
+      return 'toggle';
+    }
+
+    // 默认操作
+    if (tag === 'button' || role === 'button') {
+      return 'action';
+    }
+
+    return 'action';
+  }
+
+  // ── 语义描述生成 ───────────────────────────────
+  function generateDescription(el, role, label, interactionHint) {
+    var tag = el.tagName.toLowerCase();
+    var type = (el.getAttribute('type') || '').toLowerCase();
+    var parts = [];
+
+    // 角色中文名
+    var roleNames = {
+      'button': '按钮',
+      'link': '链接',
+      'text-input': '输入框',
+      'textarea': '文本域',
+      'searchbox': '搜索框',
+      'select': '下拉选择',
+      'checkbox': '复选框',
+      'radio': '单选框',
+      'file-upload': '文件上传',
+      'date-picker': '日期选择',
+      'range-slider': '滑块',
+      'color-picker': '颜色选择',
+      'content-editable': '可编辑区域',
+      'clickable': '可点击元素',
+      'canvas': '画布',
+      'video': '视频',
+      'audio': '音频',
+      'iframe': '内嵌框架',
+      'details': '详情展开',
+    };
+
+    var interactionNames = {
+      'submit': '提交',
+      'cancel': '取消',
+      'navigation': '导航',
+      'input': '输入',
+      'selection': '选择',
+      'toggle': '切换',
+      'action': '操作',
+    };
+
+    // 交互类型前缀
+    if (interactionHint && interactionNames[interactionHint]) {
+      parts.push(interactionNames[interactionHint]);
+    }
+
+    // 角色名称
+    if (roleNames[role]) {
+      parts.push(roleNames[role]);
+    } else {
+      parts.push(tag);
+    }
+
+    // 标签描述
+    if (label && label.length > 0) {
+      var shortLabel = label.substring(0, 30);
+      if (interactionHint === 'input' || role === 'text-input' || role === 'textarea' || role === 'searchbox') {
+        parts.push('"' + shortLabel + '"');
+      } else {
+        parts.push('"' + shortLabel + '"');
+      }
+    }
+
+    return parts.join(' ');
+  }
+
+  // ── 父元素上下文提取 ───────────────────────────
+  function getParentContext(el) {
+    var parent = el.parentElement;
+    if (!parent || parent === document.body) return undefined;
+
+    var tag = parent.tagName.toLowerCase();
+    var label = '';
+
+    // 查找父元素的标签文本
+    if (['FORM', 'SECTION', 'ARTICLE', 'ASIDE', 'NAV', 'HEADER', 'FOOTER', 'DIV'].indexOf(parent.tagName) !== -1) {
+      var heading = parent.querySelector('h1, h2, h3, h4, h5, h6, legend, .title, .heading');
+      if (heading && heading.textContent) {
+        label = (heading.textContent || '').trim().substring(0, 50);
+      }
+    }
+
+    // 通过 aria-label 或 title
+    if (!label) {
+      label = parent.getAttribute('aria-label') || parent.getAttribute('title') || '';
+      label = label.trim().substring(0, 50);
+    }
+
+    if (!label) return undefined;
+
+    return tag + (label ? ': ' + label : '');
+  }
+
+  // ── 视觉提示提取 ───────────────────────────────
+  function extractVisualHints(el) {
+    var hints = [];
+    var classStr = (el.className || '').toLowerCase();
+
+    // 图标类检测
+    var iconPatterns = [
+      { pattern: /\\b(icon|fa|glyphicon|material|mdi)\\b/, label: 'has-icon' },
+      { pattern: /\\b(search|查找|搜索)\\b/, label: 'search-icon' },
+      { pattern: /\\b(plus|add|添加|新增)\\b/, label: 'add-icon' },
+      { pattern: /\\b(minus|remove|删除)\\b/, label: 'remove-icon' },
+      { pattern: /\\b(edit|编辑|修改)\\b/, label: 'edit-icon' },
+      { pattern: /\\b(heart|like|收藏|点赞)\\b/, label: 'like-icon' },
+      { pattern: /\\b(share|分享)\\b/, label: 'share-icon' },
+      { pattern: /\\b(cart|购物车)\\b/, label: 'cart-icon' },
+      { pattern: /\\b(user|avatar|用户)\\b/, label: 'user-icon' },
+      { pattern: /\\b(menu|菜单)\\b/, label: 'menu-icon' },
+      { pattern: /\\b(close|删除|关闭)\\b/, label: 'close-icon' },
+      { pattern: /\\b(arrow|chevron|down|up|left|right)\\b/, label: 'arrow-icon' },
+    ];
+
+    for (var i = 0; i < iconPatterns.length; i++) {
+      if (iconPatterns[i].pattern.test(classStr)) {
+        hints.push(iconPatterns[i].label);
+        break; // 只取第一个匹配的图标提示
+      }
+    }
+
+    // 检查子元素中的图标
+    var iconEl = el.querySelector('i, svg, .icon, [class*="icon"]');
+    if (iconEl && hints.length === 0) {
+      hints.push('has-icon');
+    }
+
+    // 按钮样式检测
+    var cs = getComputedStyle(el);
+    if (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent') {
+      hints.push('has-bg');
+    }
+
+    return hints.length > 0 ? hints : undefined;
+  }
+
+  // ── 表单关联 Label 提取 ────────────────────────
+  function getRelatedFormLabel(el) {
+    var tag = el.tagName.toLowerCase();
+    if (!['input', 'textarea', 'select'].includes(tag)) return undefined;
+
+    // 已在 getLabel 中处理的：placeholder, label[for], aria-label
+    // 这里查找包裹的 label
+    var parentLabel = el.closest('label');
+    if (parentLabel && parentLabel !== el) {
+      var text = (parentLabel.textContent || '').replace((el.value || ''), '').trim();
+      if (text.length > 0 && text.length < 80) {
+        return text;
+      }
+    }
+
+    return undefined;
+  }
+
+  // ── 语义信息组装 ───────────────────────────────
+  function extractSemantics(el, role, label) {
+    var zone = detectFunctionalZone(el);
+    var interactionHint = inferInteractionHint(el);
+    var description = generateDescription(el, role, label, interactionHint);
+    var parentContext = getParentContext(el);
+    var relatedLabel = getRelatedFormLabel(el);
+    var visualHints = extractVisualHints(el);
+
+    return {
+      description: description,
+      zone: zone,
+      parentContext: parentContext,
+      relatedLabel: relatedLabel,
+      visualHints: visualHints,
+      interactionHint: interactionHint,
+    };
+  }
+
   // ── 主扫描（可交互元素） ─────────────────────
   var SELECTORS = [
     'a[href]', 'button', 'input', 'textarea', 'select',
@@ -309,14 +574,18 @@ const EXTRACTION_SCRIPT = `
 
       var rect = el.getBoundingClientRect();
       var rawText = (el.textContent || '').trim().replace(/\\s+/g, ' ');
+      var role = getRole(el);
+      var label = getLabel(el);
+
       elements.push({
         tag: el.tagName.toLowerCase(),
-        role: getRole(el),
+        role: role,
         selector: makeSelector(el),
-        label: getLabel(el),
+        label: label,
         text: rawText.substring(0, 120),
         state: getState(el),
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
+        semantics: extractSemantics(el, role, label),
       });
     }
   }

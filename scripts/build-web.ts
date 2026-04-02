@@ -4,9 +4,9 @@ import react from '@vitejs/plugin-react';
 async function buildWeb() {
   await build({
     plugins: [react()],
-    root: 'app/web-page',
+    root: 'apps/web',
     build: {
-      outDir: '../../dist/web-page',
+      outDir: '../../dist/web',
       emptyOutDir: true,
     },
   });

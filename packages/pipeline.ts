@@ -1,4 +1,6 @@
-import { createSSEStream } from '@@browser-hand/engine-shared/util';
+/** Pipeline — 完整的浏览器自动化流水线 */
+
+import { createSSEStream } from './utils/util';
 import type {
   IntentionResult,
   ScannerResult,
@@ -8,21 +10,24 @@ import type {
   PipelineResult,
   PipelineOptions,
   SSEEventType,
-} from '@@browser-hand/engine-shared/type';
+} from './utils/type';
 import {
   parseIntention,
   scanPage,
   vectorize,
+  preloadModel,
   abstract,
   run,
 } from './layers';
 
 type Emit = (event: SSEEventType, data: unknown) => void;
 
+// ═══════════════════════════════════════════════════════════════════════
+// 工具函数
+// ═══════════════════════════════════════════════════════════════════════
+
 function extractTargetUrl(intention: IntentionResult): string | null {
-  if (!intention.flow) {
-    return null;
-  }
+  if (!intention.flow) return null;
 
   const URL_RE = /^https?:\/\/.+/i;
 
@@ -37,6 +42,10 @@ function extractTargetUrl(intention: IntentionResult): string | null {
   return null;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Pipeline 主函数
+// ═══════════════════════════════════════════════════════════════════════
+
 export async function runPipeline(
   question: string,
   sessionId: string,
@@ -48,24 +57,23 @@ export async function runPipeline(
   const { stream, send, close } = createSSEStream();
   const emit: Emit = (event, data) => send(event, data);
 
+  // 预加载本地模型（异步，不阻塞）
+  preloadModel().catch(() => {});
+
   const result = (async (): Promise<PipelineResult> => {
     // ── 1. Intention 层 ───────────────────────────────────────────
     emit('conversation_start', { step: 'pipeline', data: { sessionId } });
 
     const intention = await parseIntention(question, {
-      onDelta: (delta) => {
-        emit('conversation_delta', { step: 'intention', data: delta });
-      },
-      onDeltaCompleted: (thinking) => {
-        emit('conversation_delta_completed', { step: 'intention', data: thinking });
-      },
+      onDelta: (delta) => emit('conversation_delta', { step: 'intention', data: delta }),
+      onDeltaCompleted: (thinking) => emit('conversation_delta_completed', { step: 'intention', data: thinking }),
       context: options.context,
       model: options.model,
     });
 
     if (!intention) {
-      emit('error', { step: 'intention', data: '意图解析失败：未返回有效结果' });
-      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId, error: '意图解析失败' } });
+      emit('error', { step: 'intention', data: '意图解析失败' });
+      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId } });
       close();
       return {
         intention: { status: 'out_of_scope', reply: '意图解析失败', flow: null, question: null },
@@ -76,38 +84,22 @@ export async function runPipeline(
       };
     }
 
-    emit('conversation_completed', {
-      step: 'intention',
-      status: intention.status,
-      data: intention,
-    });
+    emit('conversation_completed', { step: 'intention', status: intention.status, data: intention });
 
     // 非 success 状态直接结束
     if (intention.status !== 'success') {
       emit('conversation_done', { step: 'pipeline', data: { success: true, sessionId } });
       close();
-      return {
-        intention,
-        scan: null as never,
-        vector: null as never,
-        abstractor: null as never,
-        runner: null as never,
-      };
+      return { intention, scan: null as never, vector: null as never, abstractor: null as never, runner: null as never };
     }
 
     // ── 2. Scanner 层 ─────────────────────────────────────────────
     const targetUrl = extractTargetUrl(intention);
     if (!targetUrl) {
       emit('error', { step: 'pipeline', data: '未在意图流程中找到目标 URL' });
-      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId, error: '未找到目标 URL' } });
+      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId } });
       close();
-      return {
-        intention,
-        scan: null as never,
-        vector: null as never,
-        abstractor: null as never,
-        runner: null as never,
-      };
+      return { intention, scan: null as never, vector: null as never, abstractor: null as never, runner: null as never };
     }
 
     emit('conversation_delta', { step: 'scanner', data: `正在扫描页面: ${targetUrl}` });
@@ -119,31 +111,25 @@ export async function runPipeline(
         timeout: 30_000,
         autoScroll: true,
         scanFrames: true,
-        onProgress: (msg) => {
-          emit('conversation_delta', { step: 'scanner', data: msg });
-        },
+        onProgress: (msg) => emit('conversation_delta', { step: 'scanner', data: msg }),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit('error', { step: 'scanner', data: message });
-      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId, error: message } });
+      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId } });
       close();
-      return {
-        intention,
-        scan: null as never,
-        vector: null as never,
-        abstractor: null as never,
-        runner: null as never,
-      };
+      return { intention, scan: null as never, vector: null as never, abstractor: null as never, runner: null as never };
     }
 
     emit('conversation_completed', {
       step: 'scanner',
       status: 'success',
-      data: { url: scan.url, elementCount: scan.elements.length, elements: scan.elements },
+      data: { url: scan.url, elementCount: scan.elements.length },
     });
 
-    // ── 3. Vector 层（当前透传） ──────────────────────────────────
+    // ── 3. Vector 层（本地 transformer.js）─────────────────────────
+    emit('conversation_delta', { step: 'vector', data: '正在进行向量相似性检索...' });
+
     const vector: VectorResult = await vectorize(scan, intention);
 
     emit('conversation_completed', {
@@ -156,20 +142,12 @@ export async function runPipeline(
     emit('conversation_delta', { step: 'abstractor', data: '正在生成操作计划...' });
 
     const abstractor: AbstractorResult = await abstract(intention, vector, {
-      onDelta: (delta) => {
-        emit('conversation_delta', { step: 'abstractor', data: delta });
-      },
-      onDeltaCompleted: (thinking) => {
-        emit('conversation_delta_completed', { step: 'abstractor', data: thinking });
-      },
+      onDelta: (delta) => emit('conversation_delta', { step: 'abstractor', data: delta }),
+      onDeltaCompleted: (thinking) => emit('conversation_delta_completed', { step: 'abstractor', data: thinking }),
       model: options.model,
     });
 
-    emit('conversation_completed', {
-      step: 'abstractor',
-      status: 'success',
-      data: abstractor,
-    });
+    emit('conversation_completed', { step: 'abstractor', status: 'success', data: abstractor });
 
     // ── 5. Runner 层 ──────────────────────────────────────────────
     const isHeadless = options.headless ?? false;
@@ -189,18 +167,12 @@ export async function runPipeline(
           const detail = error ? ` | 错误: ${error}` : '';
           emit('conversation_delta', { step: 'runner', data: `${status} [${index}/${total}] ${codeLine}${detail}` });
         },
-        onError: (message) => {
-          emit('error', { step: 'runner', data: message });
-        },
-      });
+        onError: (message) => emit('error', { step: 'runner', data: message }),
+      }, intention);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit('error', { step: 'runner', data: message });
-      runner = {
-        results: [],
-        success: false,
-        duration: 0,
-      };
+      runner = { results: [], success: false, duration: 0 };
     }
 
     emit('conversation_completed', {
@@ -216,9 +188,14 @@ export async function runPipeline(
     });
 
     close();
-
     return { intention, scan, vector, abstractor, runner };
   })();
 
   return { stream, result };
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 导出子模块
+// ═══════════════════════════════════════════════════════════════════════
+
+export { parseIntention, scanPage, vectorize, preloadModel, abstract, run };
