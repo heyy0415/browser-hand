@@ -1,5 +1,5 @@
 export { parseIntention } from './intention';
-export { scanPage } from './scanner/scanner';
+export { scanPage } from './scanner';
 export {
   vectorize,
   processVector,
@@ -10,6 +10,6 @@ export {
   preloadModel,
   isModelReady,
   clearEmbeddingCache,
-} from './vector/vector';
+} from './vector';
 export { abstract } from './abstractor';
 export { run } from './runner';

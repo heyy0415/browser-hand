@@ -1,5 +1,7 @@
 node_modules/
 dist/
+.dev-cache/
 *.log
 .DS_Store
 .model-cache/
+.comate

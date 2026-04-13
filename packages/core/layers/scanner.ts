@@ -1,10 +1,7 @@
-/**
- * Scanner 层 — 通过 Node.js 子进程调用 Playwright 扫描页面
- * 提取所有可见可交互元素并结构化返回
- */
+/** Layer 2: Scanner — 通过 Node.js 子进程调用 Playwright 扫描页面 */
 
-import { logger } from '../../utils/util';
-import type { ScannerResult, ScanOptions } from '../../utils/type';
+import { logger } from '../llm';
+import type { ScannerResult, ScanOptions } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('scanner', msg, meta);
 

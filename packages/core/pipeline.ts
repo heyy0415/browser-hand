@@ -1,6 +1,6 @@
 /** Pipeline — 完整的浏览器自动化流水线 */
 
-import { createSSEStream } from './utils/util';
+import { createSSEStream } from './llm';
 import type {
   IntentionResult,
   ScannerResult,
@@ -10,7 +10,7 @@ import type {
   PipelineResult,
   PipelineOptions,
   SSEEventType,
-} from './utils/type';
+} from './types';
 import {
   parseIntention,
   scanPage,

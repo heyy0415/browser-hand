@@ -1,6 +1,8 @@
-import { INTENT_SYSTEM_PROMPT, INTENT_USER_PROMPT } from '../../utils/constant';
-import { logger, parseJSON, streamLLM } from '../../utils/util';
-import type { IntentionResult } from '../../utils/type';
+/** Layer 1: Intention — 意图解析 */
+
+import { INTENT_SYSTEM_PROMPT, INTENT_USER_PROMPT } from '../constants';
+import { logger, parseJSON, streamLLM } from '../llm';
+import type { IntentionResult } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('intention', msg, meta);
 

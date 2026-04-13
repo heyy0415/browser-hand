@@ -1,11 +1,11 @@
-/** Abstractor 层 — 将意图和筛选后的元素抽象为可执行伪代码 */
+/** Layer 4: Abstractor — 将意图和筛选后的元素抽象为可执行伪代码 */
 
 import {
   ABSTRACTOR_SYSTEM_PROMPT,
   ABSTRACTOR_USER_PROMPT,
-} from '../../utils/constant';
-import { logger, streamLLM } from '../../utils/util';
-import type { VectorResult, AbstractorResult, IntentionResult } from '../../utils/type';
+} from '../constants';
+import { logger, streamLLM } from '../llm';
+import type { VectorResult, AbstractorResult, IntentionResult } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('abstractor', msg, meta);
 

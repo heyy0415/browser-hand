@@ -1,11 +1,11 @@
-/** engine-shared 类型定义 */
+/** @browser-hand/core — 类型定义 */
 
 // ═══════════════════════════════════════════════════════════════════════
 // Intention 层类型定义（优化后）
 // ═══════════════════════════════════════════════════════════════════════
 
 /** 操作类型分类 */
-export type StepCategory = 
+export type StepCategory =
   | 'interaction'   // 交互型：需要打开浏览器执行操作（click, fill, select 等）
   | 'extraction'    // 获取型：获取页面内容并返回（getText, extract）
   | 'navigation'    // 导航型：页面跳转（navigate）

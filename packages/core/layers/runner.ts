@@ -1,8 +1,8 @@
-/** Runner 层 — 执行伪代码并返回结果 */
+/** Layer 5: Runner — 执行伪代码并返回结果 */
 
 import type { Page } from 'playwright';
-import { logger } from '../../utils/util';
-import { getOrCreateBrowser } from '../../utils/browser-registry';
+import { logger } from '../llm';
+import { getOrCreateBrowser } from '../browser-registry';
 import type {
   AbstractorResult,
   VectorResult,
@@ -11,8 +11,8 @@ import type {
   ActionResult,
   ActionResultType,
   IntentionResult,
-} from '../../utils/type';
-import { getStepCategory, StepCategory } from '../../utils/type';
+} from '../types';
+import { getStepCategory, StepCategory } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('runner', msg, meta);
 

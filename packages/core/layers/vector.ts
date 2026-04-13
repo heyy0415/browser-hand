@@ -1,7 +1,7 @@
-/** vector 层 — 本地向量相似性检索（使用 transformer.js） */
+/** Layer 3: Vector — 本地向量相似性检索（使用 transformer.js） */
 
 import { pipeline, env } from '@xenova/transformers';
-import { createSSEStream, logger } from '../../utils/util';
+import { createSSEStream, logger } from '../llm';
 import type {
   IntentionResult,
   ScannerResult,
@@ -13,7 +13,7 @@ import type {
   IntentionStep,
   VectorMatch,
   PageCapabilities,
-} from '../../utils/type';
+} from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('vector', msg, meta);
 
