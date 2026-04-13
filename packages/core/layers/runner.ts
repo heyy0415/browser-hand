@@ -11,6 +11,10 @@ import type {
   ActionResult,
   ActionResultType,
   IntentionResult,
+  StepResult,
+  ExtractedContent,
+  TextResult,
+  RunnerError,
 } from '../types';
 import { getStepCategory, StepCategory } from '../types';
 
@@ -20,20 +24,40 @@ const log = (msg: string, meta?: unknown) => logger.info('runner', msg, meta);
 // 伪代码解析
 // ═══════════════════════════════════════════════════════════════════════
 
-type ParsedPseudo = { method: string; args: string[] };
+type ParsedPseudo = { method: string; args: string[]; isComment: boolean };
 
 function parsePseudo(line: string): ParsedPseudo {
-  const m = line.match(/^([a-zA-Z][a-zA-Z0-9]*)\((.*)\)$/);
-  if (!m) return { method: 'click', args: [line] };
+  const trimmed = line.trim();
+
+  // 注释行：# WARNING: ...
+  if (trimmed.startsWith('#')) {
+    return { method: 'comment', args: [trimmed], isComment: true };
+  }
+
+  const m = trimmed.match(/^([a-zA-Z][a-zA-Z0-9]*)\((.*)\)$/);
+  if (!m) return { method: 'comment', args: [trimmed], isComment: true };
 
   const method = m[1];
   const args: string[] = [];
-  const re = /'([^']*)'|"([^"]*)"/g;
-  for (const hit of m[2].matchAll(re)) {
+  const inner = m[2];
+
+  // 先尝试提取引号参数：'value' 或 "value"
+  const quotedRe = /'([^']*)'|"([^"]*)"/g;
+  let hasQuotedArgs = false;
+  for (const hit of inner.matchAll(quotedRe)) {
     args.push(hit[1] ?? hit[2] ?? '');
+    hasQuotedArgs = true;
   }
 
-  return { method, args };
+  // 无引号参数时，按逗号分割提取裸值（如 wait(2000)、scrollDown()）
+  if (!hasQuotedArgs && inner.length > 0) {
+    for (const part of inner.split(',')) {
+      const val = part.trim();
+      if (val) args.push(val);
+    }
+  }
+
+  return { method, args, isComment: false };
 }
 
 function resolveActionType(method: string): ActionResultType {
@@ -41,6 +65,7 @@ function resolveActionType(method: string): ActionResultType {
     navigate: 'navigate', fill: 'fill', select: 'select',
     check: 'check', uncheck: 'check', scrollDown: 'scroll', scrollUp: 'scroll',
     screenshot: 'screenshot', getText: 'extract', extract: 'extract',
+    open: 'navigate', wait: 'wait',
   };
   return map[method] || 'click';
 }
@@ -104,10 +129,67 @@ async function clickWithOverlayFallback(page: Page, selector: string): Promise<v
       return;
     }
 
-    // 最终降级：JS 直接触发 click
     log('fallback to JS click', { selector });
     await page.evaluate(`(sel) => { document.querySelector(sel)?.click(); }`, selector);
   }
+}
+
+/**
+ * fill 操作的可见性降级：
+ * 1. 先尝试原生 page.fill
+ * 2. 如果元素不可见，尝试 scrollIntoViewIfNeeded 后重试
+ * 3. 最终降级到 JS 直接设置 value + 触发 input 事件
+ */
+async function fillWithVisibilityFallback(page: Page, selector: string, value: string): Promise<void> {
+  try {
+    await page.fill(selector, value, { timeout: 5000 });
+    return;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '';
+    if (!msg.includes('not visible') && !msg.includes('not editable')) throw error;
+
+    log('element not visible, attempting scrollIntoView', { selector });
+  }
+
+  // 尝试滚动到可见区域后重试
+  try {
+    await page.locator(selector).scrollIntoViewIfNeeded({ timeout: 3000 });
+    await page.waitForTimeout(300);
+    await page.fill(selector, value, { timeout: 5000 });
+    return;
+  } catch {
+    log('scrollIntoView failed, fallback to JS fill', { selector });
+  }
+
+  // 最终降级：JS 直接设置 value 并触发 input/change 事件
+  await page.evaluate(`
+    (args) => {
+      const [sel, val] = args;
+      const el = document.querySelector(sel);
+      if (!el) throw new Error('Element not found: ' + sel);
+
+      // 移除可能阻止输入的 readonly/disabled 属性
+      el.removeAttribute('readonly');
+      el.removeAttribute('disabled');
+
+      // 设置 value
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+      )?.set || Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, 'value'
+      )?.set;
+
+      if (nativeInputValueSetter) {
+        nativeInputValueSetter.call(el, val);
+      } else {
+        el.value = val;
+      }
+
+      // 触发事件以模拟真实输入
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  `, [selector, value]);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -141,9 +223,16 @@ async function extractMultipleContent(page: Page, selector: string): Promise<str
 // ═══════════════════════════════════════════════════════════════════════
 
 export interface RunnerCallbacks {
+  /** 旧版回调（兼容保留） */
   onStep?: (index: number, total: number, codeLine: string, success: boolean, error?: string) => void;
   onError?: (error: string) => void;
   onExtraction?: (content: string | string[], selector: string) => void;
+
+  /** 新版回调（对齐 SSE 事件格式） */
+  onStepStart?: (data: { lineNumber: number; code: string; action: string }) => void;
+  onStepDone?: (data: { lineNumber: number; code: string; status: 'success' | 'failed' | 'skipped' | 'warning'; elapsedMs: number; screenshot?: string }) => void;
+  onStepError?: (data: { lineNumber: number; code: string; error: { type: string; message: string }; retrying: boolean; retryAttempt: number }) => void;
+  onExtract?: (data: { lineNumber: number; selector: string; text: string }) => void;
 }
 
 export interface RunnerRunOptions extends RunnerOptions {
@@ -182,15 +271,31 @@ export async function run(
   const sessionId = options.sessionId || 'default';
 
   const results: ActionResult[] = [];
+  const stepResults: StepResult[] = [];
+  const textResults: TextResult[] = [];
+  const screenshotResults: string[] = [];
   const start = Date.now();
   let success = true;
   const extractedContents: Array<{ selector: string; content: string | string[] }> = [];
+  let runnerError: RunnerError | null = null;
 
-  log('start', { url: targetUrl, steps: abstractor.code.length, headless, sessionId, needsBrowser });
+  const codeLines = abstractor.code;
+
+  log('start', { url: targetUrl, steps: codeLines.length, headless, sessionId, needsBrowser });
 
   if (!needsBrowser) {
     log('skip browser', { reason: 'no interaction needed' });
-    return { results: [], success: true, duration: Date.now() - start, extractedContents };
+    return {
+      success: true,
+      steps: [],
+      extractedContent: null,
+      finalScreenshot: null,
+      error: null,
+      totalElapsedMs: Date.now() - start,
+      results: [],
+      duration: Date.now() - start,
+      extractedContents,
+    };
   }
 
   const { browser } = await getOrCreateBrowser(sessionId, headless);
@@ -202,10 +307,39 @@ export async function run(
 
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
 
-    for (let i = 0; i < abstractor.code.length; i++) {
-      const codeLine = abstractor.code[i];
-      const { method, args } = parsePseudo(codeLine);
+    for (let i = 0; i < codeLines.length; i++) {
+      const codeLine = codeLines[i];
+      const { method, args, isComment } = parsePseudo(codeLine);
       const stepCategory = resolveStepCategory(method);
+      const lineNumber = i + 1;
+      const stepStart = Date.now();
+
+      // 发射 step-start
+      callbacks.onStepStart?.({ lineNumber, code: codeLine, action: resolveActionType(method) });
+
+      // 注释行：跳过执行，标记为 skipped
+      if (isComment) {
+        const elapsedMs = Date.now() - stepStart;
+        stepResults.push({
+          lineNumber,
+          code: codeLine,
+          status: 'skipped',
+          action: resolveActionType(method),
+          selector: null,
+          value: null,
+          elapsedMs,
+          screenshot: null,
+          error: null,
+        });
+        results.push({
+          step: lineNumber,
+          success: true,
+          data: { type: resolveActionType(method), code: codeLine, pseudoCode: codeLine, category: stepCategory },
+        });
+        callbacks.onStepDone?.({ lineNumber, code: codeLine, status: 'skipped', elapsedMs });
+        callbacks.onStep?.(lineNumber, codeLines.length, codeLine, true);
+        continue;
+      }
 
       try {
         let extractedContent: string | string[] | undefined;
@@ -221,10 +355,36 @@ export async function run(
             await clickWithOverlayFallback(page, args[0]);
             break;
           case 'fill':
-            await page.fill(args[0], args[1] ?? '');
+            await fillWithVisibilityFallback(page, args[0], args[1] ?? '');
             break;
           case 'select':
-            await page.selectOption(args[0], { label: args[1] ?? '' });
+            try {
+              await page.selectOption(args[0], { label: args[1] ?? '' }, { timeout: 5000 });
+            } catch (error) {
+              const msg = error instanceof Error ? error.message : '';
+              if (msg.includes('not visible')) {
+                log('select element not visible, attempting scrollIntoView', { selector: args[0] });
+                try {
+                  await page.locator(args[0]).scrollIntoViewIfNeeded({ timeout: 3000 });
+                  await page.waitForTimeout(300);
+                  await page.selectOption(args[0], { label: args[1] ?? '' }, { timeout: 5000 });
+                } catch {
+                  log('select scrollIntoView failed, fallback to JS', { selector: args[0] });
+                  await page.evaluate(`
+                    (args) => {
+                      const [sel, val] = args;
+                      const el = document.querySelector(sel);
+                      if (el && el.tagName === 'SELECT') {
+                        el.value = val;
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                      }
+                    }
+                  `, [args[0], args[1] ?? '']);
+                }
+              } else {
+                throw error;
+              }
+            }
             break;
           case 'check':
             await page.check(args[0]);
@@ -241,29 +401,60 @@ export async function run(
           case 'screenshot': {
             const buffer = await page.screenshot({ fullPage: true });
             screenshotBuffer = buffer.toString('base64');
+            screenshotResults.push(screenshotBuffer);
             break;
           }
           case 'getText':
           case 'extract':
             extractedContent = await extractContent(page, args[0]);
             extractedContents.push({ selector: args[0], content: extractedContent });
+            textResults.push({ selector: args[0], text: extractedContent, lineNumber });
+            callbacks.onExtract?.({ lineNumber, selector: args[0], text: extractedContent });
             callbacks.onExtraction?.(extractedContent, args[0]);
             log('extracted content', { selector: args[0], length: extractedContent.length });
             break;
           case 'extractAll':
             extractedContent = await extractMultipleContent(page, args[0]);
             extractedContents.push({ selector: args[0], content: extractedContent });
+            const combinedText = Array.isArray(extractedContent) ? extractedContent.join('\n') : extractedContent;
+            textResults.push({ selector: args[0], text: combinedText, lineNumber });
+            callbacks.onExtract?.({ lineNumber, selector: args[0], text: combinedText });
             callbacks.onExtraction?.(extractedContent, args[0]);
             log('extracted multiple content', { selector: args[0], count: extractedContent.length });
             break;
-          default:
-            await clickWithOverlayFallback(page, args[0]);
+          case 'wait':
+            await page.waitForTimeout(parseInt(args[0], 10) || 2000);
+            break;
+          default: {
+            // 尝试将未知方法当作 click 处理，但必须有 selector 参数
+            const selector = args[0];
+            if (!selector) {
+              log('unknown method without selector, skipping', { method, codeLine });
+              break;
+            }
+            await clickWithOverlayFallback(page, selector);
+          }
         }
 
+        const elapsedMs = Date.now() - stepStart;
         const targetElement = vector.elements.find((el) => el.selector === args[0]);
 
+        // StepResult
+        stepResults.push({
+          lineNumber,
+          code: codeLine,
+          status: 'success',
+          action: resolveActionType(method),
+          selector: args[0] || null,
+          value: args[1] ?? null,
+          elapsedMs,
+          screenshot: screenshotBuffer || null,
+          error: null,
+        });
+
+        // ActionResult（旧版兼容）
         results.push({
-          step: i + 1,
+          step: lineNumber,
           success: true,
           data: {
             type: resolveActionType(method),
@@ -281,17 +472,41 @@ export async function run(
           ...(screenshotBuffer && { screenshot: screenshotBuffer }),
         });
 
-        callbacks.onStep?.(i + 1, abstractor.code.length, codeLine, true);
+        // 发射 step-done
+        callbacks.onStepDone?.({
+          lineNumber,
+          code: codeLine,
+          status: 'success',
+          elapsedMs,
+          screenshot: screenshotBuffer,
+        });
+        callbacks.onStep?.(lineNumber, codeLines.length, codeLine, true);
 
-        if (i < abstractor.code.length - 1) {
+        if (i < codeLines.length - 1) {
           await page.waitForTimeout(stepDelay);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         success = false;
 
+        const elapsedMs = Date.now() - stepStart;
+
+        // StepResult
+        stepResults.push({
+          lineNumber,
+          code: codeLine,
+          status: 'failed',
+          action: resolveActionType(method),
+          selector: args[0] || null,
+          value: args[1] ?? null,
+          elapsedMs,
+          screenshot: null,
+          error: message,
+        });
+
+        // ActionResult（旧版兼容）
         results.push({
-          step: i + 1,
+          step: lineNumber,
           success: false,
           error: message,
           data: {
@@ -302,7 +517,24 @@ export async function run(
           },
         });
 
-        callbacks.onStep?.(i + 1, abstractor.code.length, codeLine, false, message);
+        // RunnerError
+        runnerError = {
+          type: /timeout/i.test(message) ? 'timeout' : /not found|no element/i.test(message) ? 'element-not-found' : 'execution-error',
+          lineNumber,
+          code: codeLine,
+          message,
+          screenshot: null,
+        };
+
+        // 发射 step-error
+        callbacks.onStepError?.({
+          lineNumber,
+          code: codeLine,
+          error: { type: runnerError.type, message },
+          retrying: false,
+          retryAttempt: 0,
+        });
+        callbacks.onStep?.(lineNumber, codeLines.length, codeLine, false, message);
         break;
       }
     }
@@ -310,13 +542,40 @@ export async function run(
     if (!results.length) {
       const message = error instanceof Error ? error.message : String(error);
       success = false;
+      runnerError = {
+        type: 'navigation-failed',
+        lineNumber: 0,
+        code: '',
+        message,
+        screenshot: null,
+      };
       log('error', { message });
       callbacks.onError?.(message);
     }
   }
 
-  const duration = Date.now() - start;
-  log('done', { success, steps: results.length, duration, extractedCount: extractedContents.length });
+  // 构建 ExtractedContent
+  let extractedContent: ExtractedContent | null = null;
+  if (textResults.length > 0 || screenshotResults.length > 0) {
+    const type = textResults.length > 0 && screenshotResults.length > 0
+      ? 'mixed' as const
+      : textResults.length > 0 ? 'text' as const : 'screenshot' as const;
+    extractedContent = { type, textResults, screenshotResults };
+  }
 
-  return { results, success, duration, extractedContents };
+  const totalElapsedMs = Date.now() - start;
+  log('done', { success, steps: results.length, totalElapsedMs, extractedCount: extractedContents.length });
+
+  return {
+    success,
+    steps: stepResults,
+    extractedContent,
+    finalScreenshot: screenshotResults[screenshotResults.length - 1] || null,
+    error: runnerError,
+    totalElapsedMs,
+    // 旧字段兼容
+    results,
+    duration: totalElapsedMs,
+    extractedContents,
+  };
 }

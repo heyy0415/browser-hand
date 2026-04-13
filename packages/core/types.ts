@@ -1,7 +1,7 @@
 /** @browser-hand/core — 类型定义 */
 
 // ═══════════════════════════════════════════════════════════════════════
-// Intention 层类型定义（优化后）
+// 枚举与基础类型
 // ═══════════════════════════════════════════════════════════════════════
 
 /** 操作类型分类 */
@@ -24,8 +24,6 @@ export type ActionType =
   | 'extract'     // 提取数据
   | 'screenshot'; // 截图
 
-/** 注意：搜索操作已拆分为 fill + click 两步，不再使用 'search' 类型 */
-
 /** 根据 ActionType 推断操作类型分类 */
 export function getStepCategory(action: ActionType): StepCategory {
   switch (action) {
@@ -45,45 +43,90 @@ export function getStepCategory(action: ActionType): StepCategory {
 /** 目标类型区分 */
 export type TargetType = 'url' | 'element-description' | 'selector' | 'position';
 
+/** 交互类型提示 */
+export type InteractionType =
+  | 'input'          // 文本输入
+  | 'submit'         // 提交/按钮
+  | 'navigation'     // 链接/可点击列表项
+  | 'selection'      // 下拉/复选/单选
+  | 'toggle'         // 开关
+  | 'action';        // 通用可操作
+
+/** 功能区域类型 */
+export type ZoneType =
+  | 'search'
+  | 'navigation'
+  | 'header'
+  | 'main-content'
+  | 'sidebar'
+  | 'form'
+  | 'footer'
+  | 'trending'
+  | 'modal'
+  | 'unknown';
+
+// ═══════════════════════════════════════════════════════════════════════
+// Intention 层类型定义
+// ═══════════════════════════════════════════════════════════════════════
+
 /** 元素特征提示，帮助 Vector 层筛选 */
 export interface ElementHint {
   /** 期望的角色类型 */
-  roleHint?: string[];
+  roleHint: string[];
   /** 期望的交互类型 */
-  interactionHint?: 'input' | 'submit' | 'selection' | 'navigation' | 'toggle' | 'action';
+  interactionHint: InteractionType;
   /** 期望的功能区域 */
-  zoneHint?: string[];
+  zoneHint: ZoneType[];
   /** 关键词匹配 */
-  keywords?: string[];
+  keywords: string[];
 }
 
-/** 优化后的操作步骤结构 */
-export interface IntentionStep {
+/** 位置概念提示 */
+export interface PositionalHint {
+  /** 序号提示："第一条" → 1, "最后" → -1 */
+  ordinal?: number;
+  /** 方向提示 */
+  direction?: 'top' | 'bottom' | 'left' | 'right'
+    | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+  /** 搜索范围 */
+  scope: 'sibling' | 'zone' | 'viewport' | 'nearby';
+  /** scope=nearby 时的参考元素 */
+  referenceTarget?: string;
+}
+
+/** 操作步骤结构（对齐 README FlowStep） */
+export interface FlowStep {
   /** 标准化的动作类型 */
   action: ActionType;
-  /** 操作类型分类 */
-  category: StepCategory;
   /** 目标标识 */
   target: string;
   /** 目标类型 */
   targetType: TargetType;
   /** 操作描述 */
   desc: string;
-  /** 输入值（用于 search/fill/select 等操作） */
+  /** 输入值（用于 fill/select 等操作） */
   value?: string;
-  /** 元素特征提示 */
-  elementHint?: ElementHint;
+  /** 元素特征提示（必填） */
+  elementHint: ElementHint;
+  /** 位置概念提示 */
+  positionalHint: PositionalHint | null;
   /** 预期结果描述 */
-  expectedOutcome?: string;
-  /** 用于向量检索的查询文本（自动生成） */
+  expectedOutcome: string;
+  /** 用于向量检索的查询文本（运行时生成） */
   searchQuery?: string;
 }
 
-/** 兼容旧格式的步骤 */
-export interface IntentionStepLegacy {
-  action: string;
+/** 旧版 IntentionStep（兼容保留） */
+export interface IntentionStep {
+  action: ActionType;
+  category: StepCategory;
   target: string;
+  targetType: TargetType;
   desc: string;
+  value?: string;
+  elementHint?: ElementHint;
+  expectedOutcome?: string;
+  searchQuery?: string;
 }
 
 export type IntentionStatus = 'success' | 'clarification_needed' | 'out_of_scope';
@@ -91,9 +134,13 @@ export type IntentionStatus = 'success' | 'clarification_needed' | 'out_of_scope
 export interface IntentionResult {
   status: IntentionStatus;
   reply: string | null;
-  flow: IntentionStep[] | null;
+  flow: FlowStep[] | null;
   question: string[] | null;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Scanner 层类型定义
+// ═══════════════════════════════════════════════════════════════════════
 
 export type SemanticRole =
   | 'link'
@@ -135,21 +182,16 @@ export type FunctionalZone =
   | 'form'
   | 'list'
   | 'card'
+  | 'trending'
   | 'unknown';
 
 /** 元素的语义描述，用于让 LLM 理解元素功能 */
 export interface ElementSemantics {
-  /** 人类可读的功能描述，如 "搜索按钮"、"提交表单" */
   description: string;
-  /** 元素所属的功能区域 */
   zone: FunctionalZone;
-  /** 父元素的简要描述 */
   parentContext?: string;
-  /** 关联元素信息（如表单关联的 label） */
   relatedLabel?: string;
-  /** 视觉提示（图标类名、颜色等） */
   visualHints?: string[];
-  /** 元素的交互类型提示 */
   interactionHint?: 'submit' | 'cancel' | 'navigation' | 'action' | 'input' | 'selection' | 'toggle';
 }
 
@@ -163,25 +205,56 @@ export interface ElementSnapshot {
   framePath: string[];
   text: string;
   rect: ElementRect;
-  /** 新增：语义信息 */
   semantics?: ElementSemantics;
-  /** 用于向量检索的文本表示（运行时生成） */
   embeddingText?: string;
-  /** 向量表示（运行时生成） */
   embedding?: number[];
 }
 
-/** 页面可见文本节点（标题、段落、图片等非交互元素） */
+/** 页面可见文本节点 */
 export interface VisibleTextNode {
   tag: string;
   text: string;
 }
 
+/** 页面功能区域摘要 */
+export interface ZoneSummary {
+  zone: ZoneType;
+  selector: string;
+  elementCount: number;
+  description: string;
+}
+
+/** 页面摘要 */
+export interface PageSummary {
+  pageType: string;
+  mainFunctions: string[];
+  zones: ZoneSummary[];
+  hasSearch: boolean;
+  hasLoginForm: boolean;
+}
+
+/** 页面快照（Scanner 输出） */
+export interface PageSnapshot {
+  url: string;
+  title: string;
+  viewport: { width: number; height: number };
+  timestamp: number;
+  totalElements: number;
+  elements: ElementSnapshot[];
+  visibleText: VisibleTextNode[];
+  pageSummary: PageSummary;
+}
+
+/** 旧版 ScannerResult（兼容保留） */
 export interface ScannerResult {
   url: string;
   title: string;
   elements: ElementSnapshot[];
   visibleText: VisibleTextNode[];
+  viewport?: { width: number; height: number };
+  timestamp?: number;
+  totalElements?: number;
+  pageSummary?: PageSummary;
 }
 
 export interface ScanOptions {
@@ -191,56 +264,91 @@ export interface ScanOptions {
   scanFrames?: boolean;
 }
 
-/** 页面功能区域描述 */
+/** 页面功能区域描述（旧版兼容） */
 export interface PageZone {
   zone: FunctionalZone;
-  /** 该区域的元素数量 */
   elementCount: number;
-  /** 该区域的主要功能描述 */
   description: string;
-  /** 该区域的关键元素示例 */
   keyElements: string[];
 }
 
 /** 页面能力概述 */
 export interface PageCapabilities {
-  /** 页面主要功能（1-3个） */
   mainFunctions: string[];
-  /** 页面功能区域分布 */
   zones: PageZone[];
-  /** 页面类型判断 */
   pageType: 'search-engine' | 'e-commerce' | 'social-media' | 'content' | 'form' | 'dashboard' | 'unknown';
-  /** 是否有搜索功能 */
   hasSearch: boolean;
-  /** 是否有登录功能 */
   hasLogin: boolean;
-  /** 是否有表单提交 */
   hasForm: boolean;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Vector 层类型定义
+// ═══════════════════════════════════════════════════════════════════════
+
+/** 分数明细 */
+export interface ScoreBreakdown {
+  vectorScore: number;       // 向量相似度 [0, 1]
+  keywordScore: number;      // 关键词匹配 [0, 1]
+  positionalScore: number;   // 位置匹配 [0, 1]
+  zoneBoost: number;         // 区域加成 [0, 0.15]
+}
+
+/** 排序后的匹配元素 */
+export interface RankedElement {
+  element: ElementSnapshot;
+  score: number;
+  breakdown: ScoreBreakdown;
+  rank: number;
+}
+
+/** 检索指标 */
+export interface SearchMetrics {
+  filterBefore: number;
+  filterAfter: number;
+  vectorComputeMs: number;
+  totalMs: number;
+}
+
+/** 过滤后的快照（传给 Abstractor） */
+export interface FilteredSnapshot {
+  url: string;
+  stepIndex: number;
+  target: string;
+  topMatch: RankedElement | null;
+  candidates: RankedElement[];
+  excluded: number;
+  allElements: ElementSnapshot[];
+}
+
+/** Vector 层输出 */
+export interface VectorOutput {
+  stepIndex: number;
+  target: string;
+  totalCandidates: number;
+  afterHardFilter: number;
+  results: RankedElement[];
+  searchMetrics: SearchMetrics;
+}
+
+/** 旧版 VectorMatch（兼容保留） */
 export interface VectorMatch {
   element: ElementSnapshot;
-  /** 相似度分数（0-1） */
   score: number;
-  /** 匹配原因说明 */
   reason: string;
-  /** 匹配的步骤索引（对应 flow 中的位置） */
   matchedStep?: number;
-  /** 匹配类型 */
   matchType: 'embedding' | 'keyword' | 'hint';
 }
 
+/** 旧版 VectorResult（兼容保留） */
 export interface VectorResult {
   url: string;
   title: string;
   matches: VectorMatch[];
   elements: ElementSnapshot[];
   visibleText: VisibleTextNode[];
-  /** 新增：页面能力概述 */
   capabilities?: PageCapabilities;
-  /** 新增：按区域分组的元素 */
-  groupedElements?: Record<FunctionalZone, ElementSnapshot[]>;
-  /** 向量检索使用的查询向量 */
+  groupedElements?: Record<string, ElementSnapshot[]>;
   queryEmbedding?: number[];
   success: boolean;
   message: string;
@@ -251,7 +359,33 @@ export interface VectorOptions {
   minScore?: number;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Abstractor 层类型定义
+// ═══════════════════════════════════════════════════════════════════════
+
+/** 伪代码行 */
+export interface PseudoCodeLine {
+  lineNumber: number;
+  code: string;
+  sourceStep: number;
+  matchedElement: string | null;
+  confidence: number;
+}
+
+/** Abstractor 警告 */
+export interface AbstractorWarning {
+  type: 'no-match' | 'low-confidence' | 'ambiguous' | 'multiple-candidates';
+  stepIndex: number;
+  message: string;
+  suggestion: string;
+}
+
+/** Abstractor 输出 */
 export interface AbstractorResult {
+  pseudoCode: PseudoCodeLine[];
+  generationMethod: 'template' | 'llm';
+  warnings: AbstractorWarning[];
+  /** 旧字段兼容 */
   code: string[];
   summary: string;
   thinking?: string;
@@ -262,6 +396,47 @@ export interface AbstractorResult {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Runner 层类型定义
+// ═══════════════════════════════════════════════════════════════════════
+
+/** Runner 每步执行结果 */
+export interface StepResult {
+  lineNumber: number;
+  code: string;
+  status: 'success' | 'failed' | 'skipped' | 'warning';
+  action: ActionType;
+  selector: string | null;
+  value: string | null;
+  elapsedMs: number;
+  screenshot: string | null;
+  error: string | null;
+}
+
+/** 提取的文本结果 */
+export interface TextResult {
+  selector: string;
+  text: string;
+  lineNumber: number;
+}
+
+/** 提取内容 */
+export interface ExtractedContent {
+  type: 'text' | 'screenshot' | 'mixed';
+  textResults: TextResult[];
+  screenshotResults: string[];
+}
+
+/** Runner 错误详情 */
+export interface RunnerError {
+  type: 'element-not-found' | 'timeout' | 'navigation-failed' | 'execution-error';
+  lineNumber: number;
+  code: string;
+  message: string;
+  screenshot: string | null;
+}
+
+/** 旧版 ActionResultType（兼容保留） */
 export type ActionResultType =
   | 'click'
   | 'fill'
@@ -273,6 +448,7 @@ export type ActionResultType =
   | 'wait'
   | 'scroll';
 
+/** 旧版 ActionResult（兼容保留） */
 export interface ActionResult {
   step: number;
   success: boolean;
@@ -281,7 +457,6 @@ export interface ActionResult {
     code?: string;
     pseudoCode?: string;
     script?: string;
-    /** 操作类型分类 */
     category?: StepCategory;
     target?: {
       uid: string;
@@ -289,7 +464,6 @@ export interface ActionResult {
       tag: string;
       role: SemanticRole;
     };
-    /** 提取的内容（extraction 类型） */
     extracted?: string | string[];
     [key: string]: unknown;
   };
@@ -297,11 +471,17 @@ export interface ActionResult {
   screenshot?: string;
 }
 
+/** Runner 输出 */
 export interface RunnerResult {
-  results: ActionResult[];
   success: boolean;
+  steps: StepResult[];
+  extractedContent: ExtractedContent | null;
+  finalScreenshot: string | null;
+  error: RunnerError | null;
+  totalElapsedMs: number;
+  /** 旧字段兼容 */
+  results: ActionResult[];
   duration?: number;
-  /** 提取的内容列表 */
   extractedContents?: Array<{ selector: string; content: string | string[] }>;
 }
 
@@ -312,13 +492,38 @@ export interface RunnerOptions {
   actionTimeout?: number;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// SSE 事件类型定义
+// ═══════════════════════════════════════════════════════════════════════
+
 export const SSE_EVENT_TYPES = [
-  'conversation_start',
-  'conversation_delta',
-  'conversation_delta_completed',
-  'conversation_completed',
-  'conversation_done',
-  'error',
+  // 全局
+  'task.start',
+  'task.done',
+  'task.error',
+  // Intention
+  'intention.start',
+  'intention.thinking',
+  'intention.done',
+  // Scanner
+  'scanner.start',
+  'scanner.scanning',
+  'scanner.done',
+  // Vector
+  'vector.start',
+  'vector.filtering',
+  'vector.computing',
+  'vector.done',
+  // Abstractor
+  'abstractor.start',
+  'abstractor.done',
+  // Runner
+  'runner.start',
+  'runner.step-start',
+  'runner.step-done',
+  'runner.step-error',
+  'runner.extract',
+  'runner.done',
 ] as const;
 
 export type SSEEventType = (typeof SSE_EVENT_TYPES)[number];
@@ -326,7 +531,13 @@ export type SSEEventType = (typeof SSE_EVENT_TYPES)[number];
 export interface SSEEvent<T = unknown> {
   event: SSEEventType;
   data: T;
+  timestamp: number;
+  sessionId: string;
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Pipeline 类型定义
+// ═══════════════════════════════════════════════════════════════════════
 
 export interface PipelineResult {
   intention: IntentionResult;

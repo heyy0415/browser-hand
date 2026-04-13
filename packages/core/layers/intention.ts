@@ -6,17 +6,20 @@ import type { IntentionResult } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('intention', msg, meta);
 
-export interface StepCallbacks {
-  onDelta?: (delta: string) => void;
-  onDeltaCompleted?: (content: string) => void;
+export interface IntentionCallbacks {
+  /** 思考过程流式回调 */
+  onThinking?: (data: { delta: string; accumulated: string }) => void;
+  /** 错误回调 */
   onError?: (error: string) => void;
+  /** 对话上下文 */
   context?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** 模型名称 */
   model?: string;
 }
 
 export async function parseIntention(
   question: string,
-  callbacks: StepCallbacks = {},
+  callbacks: IntentionCallbacks = {},
 ) {
   log('start', { question, hasContext: !!callbacks.context });
 
@@ -67,13 +70,10 @@ export async function parseIntention(
       const reasoningContent = extractReasoningContent(accumulated);
       if (reasoningContent.length > emittedReasoningLength) {
         const incrementalReasoning = reasoningContent.slice(emittedReasoningLength);
-        callbacks.onDelta?.(incrementalReasoning);
+        callbacks.onThinking?.({ delta: incrementalReasoning, accumulated: reasoningContent });
         emittedReasoningLength = reasoningContent.length;
       }
     }
-
-    const finalReasoningContent = extractReasoningContent(accumulated).trim();
-    callbacks.onDeltaCompleted?.(finalReasoningContent);
 
     const contentWithoutThinking = accumulated.replace(/<thinking>[\s\S]*?<\/thinking>/, '').trim();
     const jsonMatch = contentWithoutThinking.match(/\{[\s\S]*\}/) ?? accumulated.match(/\{[\s\S]*\}/);
@@ -82,6 +82,22 @@ export async function parseIntention(
     }
 
     const result = parseJSON<IntentionResult>(jsonMatch[0]);
+
+    // 兼容：确保 flow 中的步骤有 positionalHint 和必填 elementHint
+    if (result.flow) {
+      result.flow = result.flow.map((step) => ({
+        ...step,
+        elementHint: step.elementHint ?? {
+          roleHint: [],
+          interactionHint: 'action' as const,
+          zoneHint: [],
+          keywords: [],
+        },
+        positionalHint: step.positionalHint ?? null,
+        expectedOutcome: step.expectedOutcome ?? '',
+      }));
+    }
+
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

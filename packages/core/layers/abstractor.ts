@@ -5,7 +5,7 @@ import {
   ABSTRACTOR_USER_PROMPT,
 } from '../constants';
 import { logger, streamLLM } from '../llm';
-import type { VectorResult, AbstractorResult, IntentionResult } from '../types';
+import type { VectorResult, AbstractorResult, IntentionResult, PseudoCodeLine, AbstractorWarning } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('abstractor', msg, meta);
 
@@ -23,7 +23,6 @@ function extractThinking(content: string): string {
   const afterStart = content.slice(start + '<thinking>'.length);
   const end = afterStart.indexOf('</thinking>');
   if (end < 0) {
-    // 处理 </thinking> 跨 delta 到达的情况
     let text = afterStart;
     const lastOpenAngle = text.lastIndexOf('<');
     if (lastOpenAngle !== -1 && '</thinking>'.startsWith(text.slice(lastOpenAngle))) {
@@ -46,10 +45,75 @@ function extractPseudoCode(content: string): string[] {
     .filter((line) => /^[a-zA-Z][a-zA-Z0-9]*\(/.test(line));
 }
 
+function buildPseudoCodeLines(code: string[], intention: IntentionResult, vector: VectorResult): PseudoCodeLine[] {
+  return code.map((codeLine, index) => {
+    // 尝试从伪代码中提取 selector
+    const selectorMatch = codeLine.match(/'([^']+)'/);
+    const selector = selectorMatch ? selectorMatch[1] : null;
+
+    // 查找对应的 flow step
+    let sourceStep = index;
+    let matchedElement: string | null = selector;
+    let confidence = 1.0;
+
+    if (intention.flow) {
+      // 匹配到 flow step
+      const flowSteps = intention.flow.filter((s) => s.action !== 'navigate');
+      if (index < flowSteps.length) {
+        sourceStep = intention.flow.indexOf(flowSteps[index]);
+
+        // 查找向量匹配结果
+        const match = vector.matches.find((m) => m.matchedStep === sourceStep);
+        if (match) {
+          matchedElement = match.element.selector;
+          confidence = match.score;
+        }
+      }
+    }
+
+    return {
+      lineNumber: index + 1,
+      code: codeLine,
+      sourceStep,
+      matchedElement,
+      confidence,
+    };
+  });
+}
+
+function buildWarnings(_code: string[], intention: IntentionResult, vector: VectorResult): AbstractorWarning[] {
+  const warnings: AbstractorWarning[] = [];
+
+  if (!intention.flow) return warnings;
+
+  for (let stepIndex = 0; stepIndex < intention.flow.length; stepIndex++) {
+    const step = intention.flow[stepIndex];
+    if (step.action === 'navigate') continue;
+
+    const match = vector.matches.find((m) => m.matchedStep === stepIndex);
+    if (!match) {
+      warnings.push({
+        type: 'no-match',
+        stepIndex,
+        message: `未找到匹配元素 — flow.target="${step.target}"`,
+        suggestion: '等待页面加载后重新扫描',
+      });
+    } else if (match.score < 0.5) {
+      warnings.push({
+        type: 'low-confidence',
+        stepIndex,
+        message: `${step.target} 匹配置信度较低 (${(match.score * 100).toFixed(1)}%)`,
+        suggestion: '等待页面加载后重新扫描',
+      });
+    }
+  }
+
+  return warnings;
+}
+
 function fallbackAbstract(intention: IntentionResult, vector: VectorResult): AbstractorResult {
   const code: string[] = [];
 
-  // 使用 Vector 层匹配的元素生成伪代码
   for (const step of intention.flow ?? []) {
     const match = vector.matches.find((m) => m.matchedStep === intention.flow!.indexOf(step));
 
@@ -87,9 +151,14 @@ function fallbackAbstract(intention: IntentionResult, vector: VectorResult): Abs
     }
   }
 
+  const pseudoCode = buildPseudoCodeLines(code, intention, vector);
+  const warnings = buildWarnings(code, intention, vector);
   const complexity = code.length <= 2 ? 'low' : code.length <= 5 ? 'medium' : 'high';
 
   return {
+    pseudoCode,
+    generationMethod: 'template',
+    warnings,
     code,
     summary: code.join(' -> '),
     meta: {
@@ -142,11 +211,16 @@ export async function abstract(
       throw new Error('LLM 响应中未找到可执行伪代码');
     }
 
+    const pseudoCode = buildPseudoCodeLines(code, intention, vector);
+    const warnings = buildWarnings(code, intention, vector);
     const complexity = code.length <= 2 ? 'low' : code.length <= 5 ? 'medium' : 'high';
 
-    log('done', { steps: code.length });
+    log('done', { steps: code.length, method: 'llm' });
 
     return {
+      pseudoCode,
+      generationMethod: 'llm',
+      warnings,
       code,
       summary: code.join(' -> '),
       thinking,

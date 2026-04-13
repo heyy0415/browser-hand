@@ -1,7 +1,7 @@
 /** Layer 2: Scanner — 通过 Node.js 子进程调用 Playwright 扫描页面 */
 
 import { logger } from '../llm';
-import type { ScannerResult, ScanOptions } from '../types';
+import type { ScannerResult, ScanOptions, PageSummary } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('scanner', msg, meta);
 
@@ -29,8 +29,8 @@ type WorkerMessage = WorkerProgress | WorkerResult | WorkerError;
 // ── 回调接口 ─────────────────────────────────────────────────────
 
 export interface ScanCallbacks {
-  /** 进度回调 */
-  onProgress?: (message: string) => void;
+  /** 进度回调，对齐 scanner.scanning 事件格式 */
+  onProgress?: (data: { phase: string; message: string }) => void;
   /** 错误回调 */
   onError?: (error: string) => void;
 }
@@ -86,7 +86,7 @@ function spawnScanner(
 
             switch (msg.type) {
               case 'progress':
-                callbacks.onProgress?.(msg.data);
+                callbacks.onProgress?.({ phase: 'scanning', message: msg.data });
                 log(msg.data);
                 break;
 
@@ -138,6 +138,58 @@ function spawnScanner(
   });
 }
 
+// ── 页面摘要生成 ─────────────────────────────────────────────────
+
+function buildPageSummary(result: ScannerResult): PageSummary {
+  const elements = result.elements;
+  const hasSearch = elements.some((el) =>
+    el.role === 'searchbox' ||
+    (el.semantics?.interactionHint === 'input' && /search|搜索|keyword|query|kw/i.test(el.selector + ' ' + (el.label || ''))),
+  );
+  const hasLoginForm = elements.some((el) =>
+    /login|登录|signin|sign-in/i.test((el.label || '') + ' ' + el.selector),
+  );
+
+  // 按区域分组
+  const zoneMap = new Map<string, { count: number; selectors: string[]; descriptions: string[] }>();
+  for (const el of elements) {
+    const zone = el.semantics?.zone || 'unknown';
+    const existing = zoneMap.get(zone) || { count: 0, selectors: [], descriptions: [] };
+    existing.count++;
+    if (el.selector) existing.selectors.push(el.selector);
+    if (el.semantics?.description) existing.descriptions.push(el.semantics.description);
+    zoneMap.set(zone, existing);
+  }
+
+  const zones = Array.from(zoneMap.entries()).map(([zone, info]) => ({
+    zone: zone as PageSummary['zones'][number]['zone'],
+    selector: info.selectors[0] || '',
+    elementCount: info.count,
+    description: info.descriptions.slice(0, 2).join(', ') || `${zone}区域，${info.count}个元素`,
+  }));
+
+  // 页面类型推断
+  const urlLower = result.url.toLowerCase();
+  const titleLower = (result.title || '').toLowerCase();
+  let pageType = 'unknown';
+  if (hasSearch && /google|baidu|bing|search/i.test(urlLower + titleLower)) pageType = 'search-engine';
+  else if (/taobao|jd|amazon|shop|mall/i.test(urlLower + titleLower)) pageType = 'e-commerce';
+  else if (/weibo|twitter|douyin|tiktok|bilibili/i.test(urlLower + titleLower)) pageType = 'social-media';
+
+  const mainFunctions: string[] = [];
+  if (hasSearch) mainFunctions.push('搜索功能');
+  if (hasLoginForm) mainFunctions.push('登录功能');
+  if (zoneMap.has('navigation')) mainFunctions.push('导航功能');
+
+  return {
+    pageType,
+    mainFunctions: mainFunctions.slice(0, 3),
+    zones,
+    hasSearch,
+    hasLoginForm,
+  };
+}
+
 // ── 对外接口 ─────────────────────────────────────────────────────
 
 /**
@@ -163,6 +215,12 @@ export async function scanPage(
     { pageId, timeout, autoScroll, scanFrames },
     { onProgress, onError },
   );
+
+  // 补充 PageSummary 和额外字段
+  result.viewport = result.viewport || { width: 1280, height: 720 };
+  result.timestamp = result.timestamp || Date.now();
+  result.totalElements = result.totalElements ?? result.elements.length;
+  result.pageSummary = result.pageSummary || buildPageSummary(result);
 
   log(`done: ${result.elements.length} elements from ${url}`);
   return result;

@@ -37,11 +37,26 @@ export const INTENT_SYSTEM_PROMPT = `你是一个浏览器操作意图解析器�
         "zoneHint": ["search", "form", "header", "main-content", ...],
         "keywords": ["搜索", "submit", ...]
       },
+      "positionalHint": null,
       "expectedOutcome": "预期结果"
     }
   ]
 }
 \`\`\`
+
+**positionalHint** 在用户提及位置概念时必填，否则为 null：
+
+\`\`\`json
+{"ordinal": 1, "scope": "zone"}
+{"ordinal": -1, "scope": "sibling"}
+{"direction": "top", "scope": "viewport"}
+{"direction": "bottom-left", "scope": "nearby", "referenceTarget": "搜索框"}
+\`\`\`
+
+- ordinal: 序号（"第一条"→1, "最后一个"→-1）
+- direction: 方向（top/bottom/left/right 及组合）
+- scope: 范围（sibling=同级, zone=同区域, viewport=全屏, nearby=参考元素附近）
+- referenceTarget: scope=nearby 时的参考元素描述
 
 ### B. 意图模糊 → 澄清
 \`\`\`json
@@ -120,12 +135,12 @@ B站 → https://www.bilibili.com
 ### 示例 1：简单导航
 输入："打开百度"
 <thinking>用户明确提及"百度"，直接导航到百度首页。</thinking>
-{"status":"success","reply":null,"flow":[{"action":"navigate","target":"https://www.baidu.com","targetType":"url","desc":"打开百度首页","expectedOutcome":"百度首页加载完成"}]}
+{"status":"success","reply":null,"flow":[{"action":"navigate","target":"https://www.baidu.com","targetType":"url","desc":"打开百度首页","elementHint":{"roleHint":[],"interactionHint":"action","zoneHint":[],"keywords":[]},"positionalHint":null,"expectedOutcome":"百度首页加载完成"}]}
 
 ### 示例 2：搜索（需拆分）
 输入："在京东买个手机壳"
 <thinking>用户明确提及"京东"，目标商品"手机壳"。需要导航到京东，然后搜索"手机壳"。搜索拆为 fill + click。</thinking>
-{"status":"success","reply":null,"flow":[{"action":"navigate","target":"https://www.jd.com","targetType":"url","desc":"打开京东首页"},{"action":"fill","target":"搜索输入框","targetType":"element-description","desc":"输入搜索关键词","value":"手机壳","elementHint":{"roleHint":["searchbox","textbox"],"interactionHint":"input","zoneHint":["search","header"],"keywords":["搜索","search"]}},{"action":"click","target":"搜索按钮","targetType":"element-description","desc":"点击搜索提交","elementHint":{"roleHint":["button"],"interactionHint":"submit","zoneHint":["search","header"],"keywords":["搜索","search","提交"]},"expectedOutcome":"显示手机壳搜索结果"}]}
+{"status":"success","reply":null,"flow":[{"action":"navigate","target":"https://www.jd.com","targetType":"url","desc":"打开京东首页","elementHint":{"roleHint":[],"interactionHint":"action","zoneHint":[],"keywords":[]},"positionalHint":null,"expectedOutcome":"京东首页加载完成"},{"action":"fill","target":"搜索输入框","targetType":"element-description","desc":"输入搜索关键词","value":"手机壳","elementHint":{"roleHint":["searchbox","textbox"],"interactionHint":"input","zoneHint":["search","header"],"keywords":["搜索","search"]},"positionalHint":null,"expectedOutcome":"搜索框填入手机壳"},{"action":"click","target":"搜索按钮","targetType":"element-description","desc":"点击搜索提交","elementHint":{"roleHint":["button"],"interactionHint":"submit","zoneHint":["search","header"],"keywords":["搜索","search","提交"]},"positionalHint":null,"expectedOutcome":"显示手机壳搜索结果"}]}
 
 ### 示例 3：模糊意图
 输入："搜手机"
@@ -140,7 +155,7 @@ B站 → https://www.bilibili.com
 ### 示例 5：上下文已有页面
 输入："搜索 TypeScript 教程"（附带百度首页的 page-context）
 <thinking>上下文已包含百度首页，用户要在百度搜索"TypeScript 教程"。不需要 navigate，直接 fill + click。</thinking>
-{"status":"success","reply":null,"flow":[{"action":"fill","target":"搜索输入框","targetType":"element-description","desc":"输入搜索关键词","value":"TypeScript 教程","elementHint":{"roleHint":["searchbox","textarea","textbox"],"interactionHint":"input","zoneHint":["search","header"],"keywords":["搜索","kw"]}},{"action":"click","target":"百度一下按钮","targetType":"element-description","desc":"点击搜索按钮","elementHint":{"roleHint":["button"],"interactionHint":"submit","zoneHint":["search","header"],"keywords":["百度一下","搜索"]},"expectedOutcome":"显示搜索结果"}]}
+{"status":"success","reply":null,"flow":[{"action":"fill","target":"搜索输入框","targetType":"element-description","desc":"输入搜索关键词","value":"TypeScript 教程","elementHint":{"roleHint":["searchbox","textarea","textbox"],"interactionHint":"input","zoneHint":["search","header"],"keywords":["搜索","kw"]},"positionalHint":null,"expectedOutcome":"搜索框填入关键词"},{"action":"click","target":"百度一下按钮","targetType":"element-description","desc":"点击搜索按钮","elementHint":{"roleHint":["button"],"interactionHint":"submit","zoneHint":["search","header"],"keywords":["百度一下","搜索"]},"positionalHint":null,"expectedOutcome":"显示搜索结果"}]}
 `;
 
 export const INTENT_USER_PROMPT = (input: string) => input;

@@ -1,254 +1,208 @@
-# browser-hand 技术架构设计
+# Browser Hand
+
+**自然语言驱动的浏览器自动化 — 用一句话操控网页**
+
+Browser Hand 是一个基于五层架构的浏览器自动化引擎。用户只需输入自然语言指令（如"帮我打开百度，获取热搜第一条"），系统即可自动完成意图解析、页面扫描、元素定位、伪代码生成与执行，全程通过 SSE 实时反馈进度。
 
 ---
 
-## 1. 整体架构
+## 核心思想
+
+传统浏览器自动化依赖硬编码选择器，脆弱且不可扩展。Browser Hand 的核心理念是：**让浏览器理解语义，而非让开发者编写选择器**。
+
+为此，我们设计了五层递进式流水线，将自然语言逐步转化为可执行的浏览器操作：
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         前端 (React 19)                          │
-│  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐    │
-│  │ 输入面板  │  │ 思维链展示│  │ 执行日志  │  │ 页面预览  │    │
-│  └─────┬─────┘  └─────▲─────┘  └─────▲─────┘  └─────▲─────┘    │
-│        │              │              │              │            │
-│        └──────────────┴──────────────┴──────────────┘            │
-│                           SSE Stream                             │
-└───────────────────────────────┬─────────────────────────────────┘
-                                │
-┌───────────────────────────────▼─────────────────────────────────┐
-│                       Server (Hono + Bun)                        │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                    Pipeline Orchestrator                  │    │
-│  │  ┌─────────┬─────────┬─────────┬─────────┬─────────┐   │    │
-│  │  │Intention│ Scanner │ Vector  │Abstractor│ Runner  │   │    │
-│  │  │  Layer  │  Layer  │  Layer  │  Layer   │  Layer  │   │    │
-│  │  └────┬────┴────┬────┴────┬────┴────┬─────┴────┬────┘   │    │
-│  │       │         │         │         │          │         │    │
-│  │       ▼         ▼         ▼         ▼          ▼         │    │
-│  │  ┌─────────────────────────────────────────────────┐    │    │
-│  │  │              Shared Context Bus                  │    │    │
-│  │  └─────────────────────────────────────────────────┘    │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
-│  │ LLM      │  │Playwright│  │Transformer│  │  Cache   │       │
-│  │ Adapter  │  │  Pool    │  │   .js     │  │  Layer   │       │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘       │
-└─────────────────────────────────────────────────────────────────┘
+用户输入: "帮我打开百度，获取热搜的第一条"
+    │
+    ▼
+┌───────────┐
+│ Intention  │  意图解析 — 将自然语言解析为结构化操作计划
+└─────┬─────┘
+      │ OperationPlan
+      ▼
+┌───────────┐
+│ Scanner    │  页面扫描 — 采集页面上所有可见元素的六维信息
+└─────┬─────┘
+      │ PageSnapshot
+      ▼
+┌───────────┐
+│ Vector     │  向量过滤 — 语义匹配 + 位置匹配，精准定位目标元素
+└─────┬─────┘
+      │ FilteredSnapshot
+      ▼
+┌───────────┐
+│ Abstractor │  伪代码生成 — 将匹配结果组合为可执行的伪代码
+└─────┬─────┘
+      │ PseudoCode
+      ▼
+┌───────────┐
+│ Runner     │  执行引擎 — 逐行解析伪代码，调用 Playwright 执行
+└───────────┘
 ```
+
+每一层各司其职，层间通过内部函数调用传递完整数据，同时通过 SSE 向前端推送轻量级事件摘要，实现实时可视化。
+
+### 为什么是五层？
+
+| 层 | 解决什么问题 | 关键设计 |
+|---|---|---|
+| **Intention** | 自然语言歧义 → 结构化指令 | LLM 流式推理，支持澄清与拒绝 |
+| **Scanner** | 页面元素不可知 → 六维结构化快照 | Playwright 注入脚本，提取身份/语义/空间/顺序/状态/区域 |
+| **Vector** | 语义无法区分"第几条" → 引入位置维度 | 本地 Transformer 向量检索 + 关键词匹配 + 位置排序，四阶段漏斗 |
+| **Abstractor** | 选择器与操作的对齐 → 可执行伪代码 | 高置信度用模板（零 LLM 调用），低置信度调 LLM 决策 |
+| **Runner** | 伪代码 → 浏览器真实操作 | Playwright 执行 + 失败自动重试 + 内容提取 |
 
 ---
 
-## 2. Monorepo 结构
+## 架构概览
 
 ```
 browser-hand/
-├── packages/
-│   ├── @browser-hand/
-│   │   ├── core/              # 共享类型定义、接口契约、错误体系
-│   │   ├── engine/            # 五层流水线引擎（Pipeline Orchestrator）
-│   │   ├── llm-adapter/       # LLM 适配层（通义千问 / DeepSeek / 本地模型）
-│   │   ├── vector/            # 向量检索引擎（Transformer.js 封装）
-│   │   ├── browser/           # 浏览器控制抽象层（Nodejs 实例运行 Playwright 封装）
-│   │   └── utils/             # 工具库（性能监控、缓存、日志）
-│   │
-│   └── @browser-hand-ui/      # UI 组件库
-│       ├── primitives/        # 基础原子组件
-│       ├── layouts/           # 布局组件
-│       └── hooks/             # 业务 Hooks（SSE、任务状态、执行流）
-│
-├── apps/
-│   ├── server/                # Hono 后端服务（API + SSE）
-│   ├── web/                   # React 19 前端应用（Vite）
-│   └── cli/                   # 命令行工具
-│
-├── configs/                   # 共享配置预设
-│   ├── eslint/
-│   ├── typescript/
-│   └── vitest/
-│
-├── turbo.json                 # Turborepo 任务编排
-├── pnpm-workspace.yaml        # pnpm 工作区
-└── package.json
+├── packages/core/          # @browser-hand/core — 核心五层引擎
+│   ├── pipeline.ts         #   流水线编排
+│   ├── llm.ts              #   LLM 客户端 + SSE 流
+│   ├── constants.ts        #   Prompt 模板 + 配置
+│   ├── types.ts            #   全局类型定义
+│   ├── browser-registry.ts #   浏览器实例池
+│   └── layers/
+│       ├── intention.ts    #   Layer 1: 意图解析
+│       ├── scanner.ts      #   Layer 2: 页面扫描
+│       ├── vector.ts       #   Layer 3: 向量过滤
+│       ├── abstractor.ts   #   Layer 4: 伪代码生成
+│       └── runner.ts       #   Layer 5: 执行引擎
+├── apps/server/            # @browser-hand/server — Hono HTTP 服务
+│   └── src/index.ts        #   POST /api/task (SSE)
+└── apps/web/               # @browser-hand/web — React 前端
+    └── src/
+        ├── components/     #   聊天界面、管线进度条、时间线
+        ├── hooks/          #   SSE 事件处理
+        └── services/       #   API 调用
 ```
 
-### 包依赖拓扑
-
-```
-apps/server ──→ @browser-hand/engine
-    │               │
-    │               ├──→ @browser-hand/llm-adapter
-    │               ├──→ @browser-hand/vector
-    │               ├──→ @browser-hand/browser
-    │               └──→ @browser-hand/core
-    │
-    └──→ @browser-hand/utils
-
-apps/web ──→ @browser-hand/engine
-    │
-    ├──→ @browser-hand-ui/primitives
-    ├──→ @browser-hand-ui/layouts
-    └──→ @browser-hand-ui/hooks
-```
+**技术栈**: Bun · TypeScript · React 19 · Hono · Playwright · OpenAI API (Qwen) · @xenova/transformers (本地向量模型)
 
 ---
 
-## 3. 五层流水线架构
+## 快速上手
 
-### 3.1 Pipeline 总线模型
+### 环境要求
 
-```
-                    ┌─────────────────────┐
-                    │  PipelineContext     │
-                    │  ─ sessionId         │
-                    │  ─ abortController   │
-                    │  ─ eventEmitter (SSE)│
-                    │  ─ cache             │
-                    │  ─ metrics           │
-                    └──────────┬──────────┘
-                               │
-  ┌────────────────────────────▼────────────────────────────┐
-  │                                                         │
-  │   [Input] ──→ ┌──────────┐ ──→ ┌──────────┐ ──→ ...   │
-  │               │ Stage 1  │     │ Stage 2  │             │
-  │               │ validate │     │ validate │             │
-  │               │ execute  │     │ execute  │             │
-  │               │ emit     │     │ emit     │             │
-  │               └──────────┘     └──────────┘             │
-  │                                                         │
-  └─────────────────────────────────────────────────────────┘
+- [Bun](https://bun.sh/) >= 1.0
+- [Node.js](https://nodejs.org/) >= 18 (Playwright 运行时需要)
+- Chromium 浏览器 (首次运行自动安装)
+
+### 1. 克隆项目
+
+```bash
+git clone https://github.com/heyy0415/browser-hand.git
+cd browser-hand
 ```
 
-每层遵循统一接口：
+### 2. 安装依赖
 
+```bash
+bun install
 ```
-interface PipelineStage<Input, Output> {
-  name: string
-  validate(input: Input): Result<void, ValidationError>
-  execute(input: Input, ctx: PipelineContext): Promise<Output>
+
+### 3. 安装 Playwright 浏览器
+
+```bash
+npx playwright install chromium
+```
+
+### 4. 配置 LLM API Key
+
+编辑 `packages/core/constants.ts`，填入你的 DashScope API Key：
+
+```typescript
+export const LLM_CONFIG = {
+  apiKey: "your-api-key-here",
+  baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  model: "qwen-flash",
+};
+```
+
+> 默认使用阿里云通义千问 (DashScope)，兼容 OpenAI API 格式。如需切换其他模型，修改 `baseUrl` 和 `model` 即可。
+
+### 5. 启动开发服务
+
+```bash
+bun run dev
+```
+
+这将同时启动：
+- 后端服务: `http://localhost:3000`
+- 前端界面: `http://localhost:5173`
+
+### 6. 开始使用
+
+打开前端界面，在输入框中输入自然语言指令，例如：
+
+- `打开百度`
+- `在京东搜索手机壳`
+- `帮我打开百度，获取热搜的第一条`
+
+系统将通过 SSE 实时展示每层的执行进度，包括意图推理过程、页面扫描结果、元素匹配分数和执行状态。
+
+---
+
+## API 接口
+
+### POST /api/task
+
+发起一个浏览器自动化任务，通过 SSE 流式返回执行进度。
+
+**请求体:**
+
+```json
+{
+  "question": "帮我打开百度，获取热搜的第一条",
+  "headless": false,
+  "sessionId": "可选，会话 ID",
+  "model": "可选，模型名称",
+  "context": "可选，对话上下文"
 }
 ```
 
-### 3.2 各层职责与优化策略
+**SSE 事件流:**
 
-#### Layer 1: Intention（意图解析）
+```
+task.start → intention.start → intention.thinking × N → intention.done
+           → scanner.start → scanner.scanning → scanner.done
+           → vector.start → vector.filtering → vector.computing → vector.done
+           → abstractor.start → abstractor.done
+           → runner.start → runner.step-start → runner.step-done → runner.done
+           → task.done
+```
 
-| 维度 | 设计 |
-|------|------|
-| **输入** | 用户自然语言字符串 |
-| **输出** | `OperationPlan`（结构化步骤流） |
-| **核心组件** | LLM Adapter + Prompt 模板 + Schema 校验 |
-| **优化策略** | 流式解析（边生成边验证）、意图缓存（LRU）、相似问题去重 |
-| **关键指标** | 首 token 延迟 < 200ms，完整解析 < 1s |
+### GET /api/health
 
-#### Layer 2: Scanner（页面扫描）
-
-| 维度 | 设计 |
-|------|------|
-| **输入** | 目标 URL + 扫描策略配置 |
-| **输出** | `PageSnapshot`（元素树 + 语义标注） |
-| **核心组件** | Playwright Page + 注入脚本 + MutationObserver |
-| **优化策略** | 增量扫描（仅变化区域）、Worker 线程隔离、智能采样（大页面分块） |
-| **关键指标** | 全量扫描 < 100ms，增量扫描 < 30ms |
-
-#### Layer 3: Vector（向量检索）
-
-| 维度 | 设计 |
-|------|------|
-| **输入** | 查询文本 + 候选元素列表 |
-| **输出** | 排序后的 `SearchResult[]` |
-| **核心组件** | Transformer.js（本地推理） + HNSW 索引 |
-| **优化策略** | 模型量化（ONNX）、SIMD 加速、分层缓存（内存 + 磁盘）、混合排序（向量 70% + 关键词 30%） |
-| **关键指标** | 检索延迟 < 50ms，首次模型加载 < 3s |
-
-#### Layer 4: Abstractor（伪代码生成）
-
-| 维度 | 设计 |
-|------|------|
-| **输入** | 操作意图 + 匹配到的目标元素 |
-| **输出** | `PseudoCode`（可执行的操作序列） |
-| **核心组件** | LLM Adapter + 操作模板库 + 代码验证器 |
-| **优化策略** | 模板优先匹配（跳过 LLM）、多候选并行生成 + 评分择优、生成后即时验证 |
-| **关键指标** | 生成延迟 < 500ms，模板命中率 > 40% |
-
-#### Layer 5: Runner（执行引擎）
-
-| 维度 | 设计 |
-|------|------|
-| **输入** | `PseudoCode` |
-| **输出** | `ExecutionResult`（截图 / 状态 / 错误） |
-| **核心组件** | Playwright 浏览器连接池 + 操作解析器 |
-| **优化策略** | 连接池复用、操作合并批处理、无依赖并行执行、智能重试（指数退避） |
-| **关键指标** | 单步操作 < 200ms，池化实例复用率 > 80% |
+健康检查，返回 `{ "status": "ok" }`。
 
 ---
 
-## 5. 技术栈选型
+## 开发
 
-| 领域 | 选型 | 理由 |
-|------|------|------|
-| **运行时** | Bun | 原生 TS、极速启动、SIMD 支持 |
-| **构建** | Turborepo + pnpm | Monorepo 原生支持、远程缓存 |
-| **包打包** | tsup | ESM 优先、tree-shaking |
-| **前端框架** | React 19 | Server Components、`use()` hook、Suspense |
-| **前端构建** | Vite + SWC | HMR 极速、SWC 替代 Babel |
-| **后端框架** | Hono | 轻量、边缘友好、原生 SSE |
-| **LLM** | 通义千问 (DashScope) | 中文优化、OpenAI 兼容协议 |
-| **向量引擎** | Transformer.js | 浏览器/Node 双端、本地推理 |
-| **向量索引** | HNSW | 高维近似最近邻、O(logN) 查找 |
-| **浏览器控制** | Playwright | 跨浏览器、稳定 API |
-| **状态管理** | Zustand + React Query | 轻量 + 服务端缓存 |
-| **类型校验** | Zod | 运行时 + 编译时双重校验 |
-| **测试** | Vitest | 原生 ESM、兼容 Jest |
-| **代码规范** | Biome | 比 ESLint+Prettier 快 35x |
+```bash
+# 仅启动后端
+bun run dev:server
+
+# 仅启动前端
+bun run dev:web
+
+# 类型检查
+bun run typecheck
+
+# 代码检查
+bun run lint
+
+# 运行测试
+bun test
+```
 
 ---
 
-## 6. 关键设计决策
+## License
 
-### 6.1 浏览器实例管理
-
-```
-┌─────────────────────────────┐
-│       BrowserPool           │
-│  ┌─────┐ ┌─────┐ ┌─────┐  │
-│  │ Ctx1 │ │ Ctx2 │ │ Ctx3 │  │  ← 最大并发数（默认 3）
-│  └──┬──┘ └──┬──┘ └──┬──┘  │
-│     │       │       │      │
-│     └───────┼───────┘      │
-│             ▼              │
-│      Browser Instance      │  ← 单实例多上下文隔离
-└─────────────────────────────┘
-```
-
-- 单 Browser 实例 + 多 BrowserContext（隔离会话）
-- 连接池自动扩缩，空闲超时回收
-- 异常断连自动重建
-
-### 6.2 缓存策略
-
-```
-L1: 内存缓存（LRU, TTL 5min）
-  │ 命中 → 直接返回
-  ▼
-L2: 磁盘缓存（.cache/, TTL 24h）
-  │ 命中 → 加载并回填 L1
-  ▼
-L3: 原始计算
-  │ 结果 → 回填 L2 + L1
-```
-
-缓存对象：
-- 意图解析结果（按输入文本 hash）
-- 页面元素向量（按 URL + DOM hash）
-- LLM 响应（按 prompt hash）
-
-### 6.3 容错与重试
-
-```
-错误分类:
-├── 可重试（网络超时、LLM 限流）     → 指数退避，最多 3 次
-├── 可降级（向量检索失败）            → 回退到关键词匹配
-├── 需中断（用户取消、权限错误）      → 立即终止，清理资源
-└── 不可恢复（页面结构剧变）          → 通知用户，建议重新扫描
-```
+MIT

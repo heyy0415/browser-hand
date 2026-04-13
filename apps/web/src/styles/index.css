@@ -10,7 +10,6 @@
 
 ::-webkit-scrollbar-track {
   background: transparent;
-  /* 轨道无背景色 */
 }
 
 ::-webkit-scrollbar-thumb {
@@ -276,99 +275,347 @@ textarea {
   margin-bottom: 30px;
 }
 
-.b-handassistant-status {
-  color: #9aa1ad;
-  font-size: 13px;
-  margin-bottom: 10px;
-}
+/* ═══════════════════════════════════════════════════════════════════════
+   Pipeline 状态指示器
+   ═══════════════════════════════════════════════════════════════════════ */
 
-.b-handassistant-content {
+.b-handpipeline-bar {
   display: flex;
-  align-items: flex-start;
-}
-
-.b-handassistant-loading {
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  margin-top: 2.5px;
-  margin-right: 5px;
-}
-
-.b-handassistant-text {
-  color: #151922;
-  font-size: 16px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-
-.b-handassistant-error {
-  color: #e03131;
-  font-size: 14px;
-}
-
-/* ── 区域2：执行结果区 ────────────────────────────────── */
-
-.b-handresults-area {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.b-handresult-block {
-  padding: 10px 14px;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 16px;
+  padding: 10px 16px;
   background: #f8f9fa;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid #e9ecef;
-  font-size: 13px;
 }
 
-.b-handresult-header {
+.b-handpipeline-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  position: relative;
+}
+
+.b-handpipeline-node {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+  transition: all 0.3s ease;
+}
+
+.b-handpipeline-node.is-pending {
+  background: #e9ecef;
+  color: #adb5bd;
+}
+
+.b-handpipeline-node.is-running {
+  background: #e6edff;
+  color: #3a5eff;
+}
+
+.b-handpipeline-node.is-done {
+  background: #d3f9d8;
+  color: #2b8a3e;
+}
+
+.b-handpipeline-node.is-error {
+  background: #ffe3e3;
+  color: #c92a2a;
+}
+
+.b-handpipeline-check {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.b-handpipeline-cross {
+  font-size: 12px;
+  line-height: 1;
+}
+
+.b-handpipeline-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ced4da;
+}
+
+.b-handpipeline-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #3a5eff33;
+  border-top-color: #3a5eff;
+  border-radius: 50%;
+  animation: b-hand-spin 0.8s linear infinite;
+}
+
+.b-handpipeline-label {
+  font-size: 12px;
+  color: #495057;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.b-handpipeline-connector {
+  flex: 1;
+  height: 2px;
+  background: #dee2e6;
+  margin: 0 4px;
+  min-width: 12px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   思考过程面板
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.b-handthinking {
+  margin-bottom: 12px;
+  border: 1px solid #e9ecef;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafbfc;
+  transition: all 0.3s ease;
+}
+
+.b-handthinking.is-collapsed {
+  border-color: #f0f1f3;
+}
+
+.b-handthinking-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+  background: #f5f6f8;
 }
 
-.b-handresult-label {
-  font-weight: 600;
-  color: #495057;
+.b-handthinking-title {
   font-size: 12px;
+  font-weight: 600;
+  color: #6f7785;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
 
-.b-handresult-status {
+.b-handthinking-toggle {
+  font-size: 10px;
+  color: #9aa1ad;
+}
+
+.b-handthinking-content {
+  padding: 10px 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.b-handthinking-loading {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.b-handthinking-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #495057;
+  white-space: pre-wrap;
+}
+
+.b-handthinking-summary {
+  padding: 6px 12px;
   font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 10px;
+  color: #9aa1ad;
+  font-style: italic;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Runner 执行时间线
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.b-handtimeline {
+  margin-bottom: 12px;
+  padding: 8px 0;
+}
+
+.b-handtimeline-step {
+  display: flex;
+  gap: 12px;
+  min-height: 40px;
+}
+
+.b-handtimeline-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 24px;
+  flex-shrink: 0;
+}
+
+.b-handtimeline-node {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+  transition: all 0.3s ease;
+}
+
+.b-handtimeline-node.is-running {
+  background: #e6edff;
+  color: #3a5eff;
+}
+
+.b-handtimeline-node.is-success {
+  background: #d3f9d8;
+  color: #2b8a3e;
+}
+
+.b-handtimeline-node.is-failed {
+  background: #ffe3e3;
+  color: #c92a2a;
+}
+
+.b-handtimeline-node.is-skipped {
+  background: #fff3bf;
+  color: #e67700;
+}
+
+.b-handtimeline-node.is-warning {
+  background: #fff3bf;
+  color: #e67700;
+}
+
+.b-handtimeline-check {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.b-handtimeline-cross {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.b-handtimeline-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #3a5eff33;
+  border-top-color: #3a5eff;
+  border-radius: 50%;
+  animation: b-hand-spin 0.8s linear infinite;
+}
+
+.b-handtimeline-line {
+  width: 2px;
+  flex: 1;
+  min-height: 8px;
+  background: #dee2e6;
+  margin: 2px 0;
+}
+
+.b-handtimeline-body {
+  flex: 1;
+  padding-bottom: 8px;
+}
+
+.b-handtimeline-code {
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 13px;
+  color: #1f2937;
+  padding: 4px 0;
+}
+
+.b-handtimeline-meta {
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.b-handtimeline-running {
+  color: #3a5eff;
   font-weight: 500;
 }
 
-.b-handresult-status.is-success {
+.b-handtimeline-elapsed {
+  color: #868e96;
+}
+
+.b-handtimeline-error {
+  color: #c92a2a;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   提取内容展示
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.b-handextracted {
+  margin-top: 12px;
+  border: 1px solid #d3f9d8;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f0fff4;
+}
+
+.b-handextracted-header {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
   color: #2b8a3e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
   background: #d3f9d8;
 }
 
-.b-handresult-status.is-error {
-  color: #c92a2a;
-  background: #ffe3e3;
+.b-handextracted-text {
+  padding: 8px 12px;
+  border-bottom: 1px solid #e9ecef;
 }
 
-.b-handresult-json {
-  margin: 0;
+.b-handextracted-text:last-child {
+  border-bottom: none;
+}
+
+.b-handextracted-selector {
   font-family: 'Courier New', Courier, monospace;
-  font-size: 12px;
-  line-height: 1.4;
-  color: #495057;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 300px;
-  overflow-y: auto;
+  font-size: 11px;
+  color: #868e96;
+  margin-bottom: 4px;
 }
 
-/* ── 区域3：错误区 ────────────────────────────────────── */
+.b-handextracted-value {
+  font-size: 14px;
+  color: #1f2937;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.b-handextracted-screenshot {
+  padding: 8px 12px;
+}
+
+.b-handextracted-screenshot img {
+  max-width: 100%;
+  border-radius: 4px;
+  border: 1px solid #e9ecef;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   错误区域
+   ═══════════════════════════════════════════════════════════════════════ */
 
 .b-handerror-area {
   margin-top: 12px;
@@ -382,6 +629,10 @@ textarea {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   输入区域
+   ═══════════════════════════════════════════════════════════════════════ */
 
 .b-handinput-wrap {
   padding: 0 34px 10px;
@@ -424,9 +675,6 @@ textarea {
   display: grid;
   place-items: center;
   cursor: pointer;
-}
-
-.b-handsend {
   right: 14px;
   background: #8b919a;
   color: #fff;
@@ -445,7 +693,10 @@ textarea {
   font-size: 11px;
 }
 
-/* 全局澄清问题弹窗 */
+/* ═══════════════════════════════════════════════════════════════════════
+   澄清弹窗
+   ═══════════════════════════════════════════════════════════════════════ */
+
 .b-handclarification-modal-overlay {
   position: fixed;
   top: 0;
@@ -507,6 +758,29 @@ textarea {
 .b-handclarification-modal-button:active {
   background: #e5e7eb;
   transform: translateY(0);
+}
+
+.b-handclarification-options {
+  padding: 10px 14px;
+}
+
+.b-handclarification-text {
+  color: #4a5568;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   动画
+   ═══════════════════════════════════════════════════════════════════════ */
+
+@keyframes b-hand-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes fadeIn {

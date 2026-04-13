@@ -36,7 +36,7 @@ export async function* streamLLM(
 
 export function createSSEStream(): {
   stream: ReadableStream<Uint8Array>;
-  send: (event: SSEEventType, data: unknown) => void;
+  send: (event: SSEEventType, data: unknown, sessionId?: string) => void;
   close: () => void;
 } {
   const encoder = new TextEncoder();
@@ -55,8 +55,14 @@ export function createSSEStream(): {
     },
   });
 
-  const send = (event: SSEEventType, data: unknown) => {
-    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  const send = (event: SSEEventType, data: unknown, sessionId?: string) => {
+    const payload = {
+      event,
+      data,
+      timestamp: Date.now(),
+      sessionId: sessionId ?? '',
+    };
+    const message = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
     const encoded = encoder.encode(message);
 
     if (!controller) {

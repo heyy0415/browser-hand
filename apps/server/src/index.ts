@@ -62,6 +62,7 @@ app.post('/api/task', async (c) => {
             const data = line.slice(6).trim();
             try {
               const parsed = JSON.parse(data);
+              // 透传事件名和完整 payload
               await stream.writeSSE({ event: currentEvent, data: JSON.stringify(parsed) });
             } catch {
               // ignore
@@ -75,7 +76,7 @@ app.post('/api/task', async (c) => {
       const msg = err instanceof Error ? err.message : String(err);
       log('task error', msg);
       await stream.writeSSE({
-        event: 'error',
+        event: 'task.error',
         data: JSON.stringify({ message: msg }),
       });
     }

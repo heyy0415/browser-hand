@@ -55,25 +55,28 @@ export async function runPipeline(
   result: Promise<PipelineResult>;
 }> {
   const { stream, send, close } = createSSEStream();
-  const emit: Emit = (event, data) => send(event, data);
+  const emit: Emit = (event, data) => send(event, data, sessionId);
 
   // 预加载本地模型（异步，不阻塞）
   preloadModel().catch(() => {});
 
   const result = (async (): Promise<PipelineResult> => {
-    // ── 1. Intention 层 ───────────────────────────────────────────
-    emit('conversation_start', { step: 'pipeline', data: { sessionId } });
+    // ── 0. 全局开始 ──────────────────────────────────────────────
+    emit('task.start', { question });
 
+    // ── 1. Intention 层 ───────────────────────────────────────────
+    emit('intention.start', { question });
+
+    const intentionStartTime = Date.now();
     const intention = await parseIntention(question, {
-      onDelta: (delta) => emit('conversation_delta', { step: 'intention', data: delta }),
-      onDeltaCompleted: (thinking) => emit('conversation_delta_completed', { step: 'intention', data: thinking }),
+      onThinking: ({ delta, accumulated }) => emit('intention.thinking', { delta, accumulated }),
       context: options.context,
       model: options.model,
     });
 
     if (!intention) {
-      emit('error', { step: 'intention', data: '意图解析失败' });
-      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId } });
+      emit('task.error', { step: 'intention', message: '意图解析失败' });
+      emit('task.done', { success: false, sessionId });
       close();
       return {
         intention: { status: 'out_of_scope', reply: '意图解析失败', flow: null, question: null },
@@ -84,11 +87,17 @@ export async function runPipeline(
       };
     }
 
-    emit('conversation_completed', { step: 'intention', status: intention.status, data: intention });
+    emit('intention.done', {
+      status: intention.status,
+      reply: intention.reply,
+      flow: intention.flow,
+      question: intention.question,
+      elapsedMs: Date.now() - intentionStartTime,
+    });
 
     // 非 success 状态直接结束
     if (intention.status !== 'success') {
-      emit('conversation_done', { step: 'pipeline', data: { success: true, sessionId } });
+      emit('task.done', { success: true, sessionId });
       close();
       return { intention, scan: null as never, vector: null as never, abstractor: null as never, runner: null as never };
     }
@@ -96,13 +105,13 @@ export async function runPipeline(
     // ── 2. Scanner 层 ─────────────────────────────────────────────
     const targetUrl = extractTargetUrl(intention);
     if (!targetUrl) {
-      emit('error', { step: 'pipeline', data: '未在意图流程中找到目标 URL' });
-      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId } });
+      emit('task.error', { step: 'pipeline', message: '未在意图流程中找到目标 URL' });
+      emit('task.done', { success: false, sessionId });
       close();
       return { intention, scan: null as never, vector: null as never, abstractor: null as never, runner: null as never };
     }
 
-    emit('conversation_delta', { step: 'scanner', data: `正在扫描页面: ${targetUrl}` });
+    emit('scanner.start', { url: targetUrl, waitForStable: true });
 
     let scan: ScannerResult;
     try {
@@ -111,47 +120,67 @@ export async function runPipeline(
         timeout: 30_000,
         autoScroll: true,
         scanFrames: true,
-        onProgress: (msg) => emit('conversation_delta', { step: 'scanner', data: msg }),
+        onProgress: (data) => emit('scanner.scanning', data),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      emit('error', { step: 'scanner', data: message });
-      emit('conversation_done', { step: 'pipeline', data: { success: false, sessionId } });
+      emit('task.error', { step: 'scanner', message });
+      emit('task.done', { success: false, sessionId });
       close();
       return { intention, scan: null as never, vector: null as never, abstractor: null as never, runner: null as never };
     }
 
-    emit('conversation_completed', {
-      step: 'scanner',
-      status: 'success',
-      data: { url: scan.url, elementCount: scan.elements.length },
+    emit('scanner.done', {
+      url: scan.url,
+      title: scan.title,
+      totalElements: scan.elements.length,
+      pageSummary: scan.pageSummary,
     });
 
     // ── 3. Vector 层（本地 transformer.js）─────────────────────────
-    emit('conversation_delta', { step: 'vector', data: '正在进行向量相似性检索...' });
+    emit('vector.start', { stepIndex: 0, target: '', totalElements: scan.elements.length });
 
-    const vector: VectorResult = await vectorize(scan, intention);
+    const vector: VectorResult = await vectorize(scan, intention, {
+      topK: 20,
+      minScore: 0.3,
+      onFiltering: (data) => emit('vector.filtering', data),
+      onComputing: (data) => emit('vector.computing', data),
+    });
 
-    emit('conversation_completed', {
-      step: 'vector',
-      status: 'success',
-      data: { url: vector.url, elementCount: vector.elements.length, message: vector.message },
+    emit('vector.done', {
+      stepIndex: 0,
+      target: '',
+      totalCandidates: scan.elements.length,
+      afterHardFilter: vector.elements.length,
+      results: vector.matches.slice(0, 5).map((m, i) => ({
+        rank: i + 1,
+        selector: m.element.selector,
+        label: m.element.label,
+        score: m.score,
+        breakdown: { vectorScore: m.score, keywordScore: 0, positionalScore: 0, zoneBoost: 0 },
+      })),
+      elapsedMs: 0,
     });
 
     // ── 4. Abstractor 层 ──────────────────────────────────────────
-    emit('conversation_delta', { step: 'abstractor', data: '正在生成操作计划...' });
+    emit('abstractor.start', { totalSteps: intention.flow?.length ?? 0 });
 
     const abstractor: AbstractorResult = await abstract(intention, vector, {
-      onDelta: (delta) => emit('conversation_delta', { step: 'abstractor', data: delta }),
-      onDeltaCompleted: (thinking) => emit('conversation_delta_completed', { step: 'abstractor', data: thinking }),
+      onDelta: (_delta) => {}, // Abstractor 思考过程不再推送 delta，由 abstractor.done 统一输出
+      onDeltaCompleted: () => {},
       model: options.model,
     });
 
-    emit('conversation_completed', { step: 'abstractor', status: 'success', data: abstractor });
+    emit('abstractor.done', {
+      pseudoCode: abstractor.pseudoCode,
+      generationMethod: abstractor.generationMethod,
+      warnings: abstractor.warnings,
+      elapsedMs: 0,
+    });
 
     // ── 5. Runner 层 ──────────────────────────────────────────────
     const isHeadless = options.headless ?? false;
-    emit('conversation_delta', { step: 'runner', data: `正在执行操作（${isHeadless ? '无头' : '有头'}模式）...` });
+    emit('runner.start', { totalSteps: abstractor.code.length, headless: isHeadless });
 
     let runner: RunnerResult;
     try {
@@ -162,29 +191,42 @@ export async function runPipeline(
         actionTimeout: 10_000,
         sessionId,
       }, {
-        onStep: (index, total, codeLine, success, error) => {
-          const status = success ? '✓' : '✗';
-          const detail = error ? ` | 错误: ${error}` : '';
-          emit('conversation_delta', { step: 'runner', data: `${status} [${index}/${total}] ${codeLine}${detail}` });
+        onStepStart: (data) => emit('runner.step-start', data),
+        onStepDone: (data) => emit('runner.step-done', data),
+        onStepError: (data) => emit('runner.step-error', data),
+        onExtract: (data) => emit('runner.extract', data),
+        onStep: (_index, _total, _codeLine, _success, _error) => {
+          // 旧版回调兼容（不发送事件）
         },
-        onError: (message) => emit('error', { step: 'runner', data: message }),
+        onError: (message) => emit('task.error', { step: 'runner', message }),
       }, intention);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      emit('error', { step: 'runner', data: message });
-      runner = { results: [], success: false, duration: 0 };
+      emit('task.error', { step: 'runner', message });
+      runner = {
+        success: false,
+        steps: [],
+        extractedContent: null,
+        finalScreenshot: null,
+        error: { type: 'execution-error', lineNumber: 0, code: '', message, screenshot: null },
+        totalElapsedMs: 0,
+        results: [],
+        duration: 0,
+      };
     }
 
-    emit('conversation_completed', {
-      step: 'runner',
-      status: runner.success ? 'success' : 'error',
-      data: runner,
+    emit('runner.done', {
+      success: runner.success,
+      steps: runner.steps.map((s) => ({ lineNumber: s.lineNumber, status: s.status, elapsedMs: s.elapsedMs })),
+      extractedContent: runner.extractedContent,
+      totalElapsedMs: runner.totalElapsedMs,
     });
 
     // ── 完成 ──────────────────────────────────────────────────────
-    emit('conversation_done', {
-      step: 'pipeline',
-      data: { success: runner.success, sessionId, duration: runner.duration },
+    emit('task.done', {
+      success: runner.success,
+      sessionId,
+      duration: runner.totalElapsedMs,
     });
 
     close();

@@ -10,7 +10,7 @@ import type {
   ElementSnapshot,
   FunctionalZone,
   PageZone,
-  IntentionStep,
+  FlowStep,
   VectorMatch,
   PageCapabilities,
 } from '../types';
@@ -166,7 +166,7 @@ function generateElementEmbeddingText(element: ElementSnapshot): string {
   return parts.join(' ');
 }
 
-function generateStepSearchQuery(step: IntentionStep): string {
+function generateStepSearchQuery(step: FlowStep): string {
   const parts: string[] = [step.target, step.desc];
 
   if (step.elementHint?.keywords) parts.push(...step.elementHint.keywords);
@@ -200,7 +200,7 @@ async function embedElements(elements: ElementSnapshot[]): Promise<void> {
   }
 }
 
-async function embedStep(step: IntentionStep): Promise<number[]> {
+async function embedStep(step: FlowStep): Promise<number[]> {
   step.searchQuery = generateStepSearchQuery(step);
   return getEmbedding(step.searchQuery);
 }
@@ -220,7 +220,7 @@ function findElementsByEmbedding(
 }
 
 function findElementsByKeyword(
-  step: IntentionStep,
+  step: FlowStep,
   elements: ElementSnapshot[],
 ): Array<{ element: ElementSnapshot; score: number }> {
   const keywords: string[] = [
@@ -248,7 +248,7 @@ function findElementsByKeyword(
 }
 
 function hybridSearch(
-  step: IntentionStep,
+  step: FlowStep,
   queryVector: number[],
   elements: ElementSnapshot[],
   topK: number,
@@ -317,7 +317,7 @@ function analyzePageCapabilities(elements: ElementSnapshot[], title: string, url
   const zones: Record<FunctionalZone, ElementSnapshot[]> = {
     'navigation': [], 'search': [], 'main-content': [], 'sidebar': [],
     'header': [], 'footer': [], 'modal': [], 'form': [],
-    'list': [], 'card': [], 'unknown': [],
+    'list': [], 'card': [], 'trending': [], 'unknown': [],
   };
 
   for (const el of elements) {
@@ -328,7 +328,7 @@ function analyzePageCapabilities(elements: ElementSnapshot[], title: string, url
     'navigation': '导航区域', 'search': '搜索区域', 'main-content': '主要内容区域',
     'sidebar': '侧边栏', 'header': '页面头部', 'footer': '页面底部',
     'modal': '弹窗/对话框', 'form': '表单区域', 'list': '列表区域',
-    'card': '卡片/商品区域', 'unknown': '其他区域',
+    'card': '卡片/商品区域', 'trending': '热搜/热门区域', 'unknown': '其他区域',
   };
 
   const pageZones: PageZone[] = Object.entries(zones)
@@ -385,6 +385,17 @@ function analyzePageCapabilities(elements: ElementSnapshot[], title: string, url
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 回调接口
+// ═══════════════════════════════════════════════════════════════════════
+
+export interface VectorCallbacks {
+  /** 硬过滤完成回调 */
+  onFiltering?: (data: { stepIndex: number; before: number; after: number; filters: Array<{ rule: string; removed: number }> }) => void;
+  /** 向量计算完成回调 */
+  onComputing?: (data: { stepIndex: number; elementsIndexed: number; vectorComputeMs: number }) => void;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // 导出接口
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -404,7 +415,7 @@ export function clearEmbeddingCache(): void {
 export async function vectorize(
   scan: ScannerResult,
   intention: IntentionResult,
-  options: VectorOptions = {},
+  options: VectorOptions & VectorCallbacks = {},
 ): Promise<VectorResult> {
   const topK = options.topK || 20;
   const minScore = options.minScore || 0.3;
@@ -413,7 +424,9 @@ export async function vectorize(
 
   // 1. 为所有元素生成 embedding
   log('generating embeddings');
+  const vectorComputeStart = Date.now();
   await embedElements(scan.elements);
+  const vectorComputeMs = Date.now() - vectorComputeStart;
 
   // 2. 分析页面能力
   const capabilities = analyzePageCapabilities(scan.elements, scan.title || '', scan.url);
@@ -443,7 +456,37 @@ export async function vectorize(
     if (step.action === 'navigate') continue;
 
     log(`embedding step ${stepIndex}: ${step.action}`);
+
+    // 硬过滤回调
+    const beforeFilter = scan.elements.length;
+    const filteredElements = scan.elements.filter((el) => {
+      if (step.elementHint?.interactionHint && el.semantics?.interactionHint !== step.elementHint.interactionHint) {
+        return false;
+      }
+      return true;
+    });
+    const afterFilter = filteredElements.length;
+
+    if (options.onFiltering) {
+      options.onFiltering({
+        stepIndex,
+        before: beforeFilter,
+        after: afterFilter,
+        filters: [{ rule: `interactionHint=${step.elementHint?.interactionHint || '*'}`, removed: beforeFilter - afterFilter }],
+      });
+    }
+
     const queryVector = await embedStep(step);
+
+    // 向量计算回调
+    if (options.onComputing) {
+      options.onComputing({
+        stepIndex,
+        elementsIndexed: filteredElements.length,
+        vectorComputeMs,
+      });
+    }
+
     const stepMatches = hybridSearch(step, queryVector, scan.elements, Math.ceil(topK / intention.flow.length), minScore);
 
     for (const match of stepMatches) {
@@ -463,7 +506,7 @@ export async function vectorize(
   const groupedElements: Record<FunctionalZone, ElementSnapshot[]> = {
     'navigation': [], 'search': [], 'main-content': [], 'sidebar': [],
     'header': [], 'footer': [], 'modal': [], 'form': [],
-    'list': [], 'card': [], 'unknown': [],
+    'list': [], 'card': [], 'trending': [], 'unknown': [],
   };
   for (const el of selectedElements) {
     groupedElements[el.semantics?.zone || 'unknown'].push(el);
@@ -489,25 +532,31 @@ export async function processVector(
   scan: ScannerResult,
   intention: IntentionResult,
   options: VectorOptions = {},
+  sessionId: string = '',
 ): Promise<{ stream: ReadableStream<Uint8Array>; result: Promise<VectorResult> }> {
   const { stream, send, close } = createSSEStream();
 
   const result = (async () => {
-    send('conversation_start', { step: 'vector' });
-    const vectorResult = await vectorize(scan, intention, options);
-    send('conversation_completed', {
-      step: 'vector',
-      data: {
-        elementCount: vectorResult.elements.length,
-        capabilities: vectorResult.capabilities,
-        topMatches: vectorResult.matches.slice(0, 5).map((m) => ({
-          selector: m.element.selector,
-          score: m.score.toFixed(2),
-          reason: m.reason,
-        })),
-      },
+    send('vector.start', { stepIndex: 0, target: '', totalElements: scan.elements.length }, sessionId);
+    const vectorResult = await vectorize(scan, intention, {
+      ...options,
+      onFiltering: (data) => send('vector.filtering', data, sessionId),
+      onComputing: (data) => send('vector.computing', data, sessionId),
     });
-    send('conversation_done', { success: true });
+    send('vector.done', {
+      stepIndex: 0,
+      target: '',
+      totalCandidates: scan.elements.length,
+      afterHardFilter: vectorResult.elements.length,
+      results: vectorResult.matches.slice(0, 5).map((m) => ({
+        rank: 0,
+        selector: m.element.selector,
+        label: m.element.label,
+        score: m.score,
+        breakdown: { vectorScore: m.score, keywordScore: 0, positionalScore: 0, zoneBoost: 0 },
+      })),
+      elapsedMs: 0,
+    }, sessionId);
     close();
     return vectorResult;
   })();
