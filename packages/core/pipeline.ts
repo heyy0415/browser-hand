@@ -72,7 +72,7 @@ export async function runPipeline(
       onThinking: ({ delta, accumulated }) => emit('intention.thinking', { delta, accumulated }),
       context: options.context,
       model: options.model,
-    });
+    }, undefined); // 首次无 pageSummary，多轮可从上下文获取
 
     if (!intention) {
       emit('task.error', { step: 'intention', message: '意图解析失败' });

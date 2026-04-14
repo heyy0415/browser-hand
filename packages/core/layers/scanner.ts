@@ -1,7 +1,7 @@
 /** Layer 2: Scanner — 通过 Node.js 子进程调用 Playwright 扫描页面 */
 
 import { logger } from '../llm';
-import type { ScannerResult, ScanOptions, PageSummary } from '../types';
+import type { ScannerResult, ScanOptions, PageSummary, ElementRect } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('scanner', msg, meta);
 
@@ -181,12 +181,18 @@ function buildPageSummary(result: ScannerResult): PageSummary {
   if (hasLoginForm) mainFunctions.push('登录功能');
   if (zoneMap.has('navigation')) mainFunctions.push('导航功能');
 
+  // 从 ScannerResult 中提取 zonesBoundingBox
+  const zonesBoundingBox = (result as unknown as Record<string, unknown>).zonesBoundingBox as Record<string, ElementRect> | undefined;
+
   return {
     pageType,
     mainFunctions: mainFunctions.slice(0, 3),
     zones,
     hasSearch,
     hasLoginForm,
+    url: result.url,
+    title: result.title,
+    zonesBoundingBox,
   };
 }
 

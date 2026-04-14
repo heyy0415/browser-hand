@@ -81,6 +81,62 @@ function buildPseudoCodeLines(code: string[], intention: IntentionResult, vector
   });
 }
 
+/** 构建 Top3 匹配结果传给 ABSTRACTOR_USER_PROMPT */
+function buildTopMatches(
+  intention: IntentionResult,
+  vector: VectorResult,
+): Array<{
+  stepIndex: number;
+  target: string;
+  matches: Array<{
+    rank: number;
+    selector: string;
+    score: number;
+    zone?: string;
+    rect?: { x: number; y: number; width: number; height: number };
+  }>;
+}> {
+  if (!intention.flow) return [];
+
+  // 按 matchedStep 分组
+  const stepMatches = new Map<number, Array<{ element: typeof vector.matches[number]['element']; score: number }>>();
+  for (const m of vector.matches) {
+    if (m.matchedStep === undefined) continue;
+    if (!stepMatches.has(m.matchedStep)) stepMatches.set(m.matchedStep, []);
+    stepMatches.get(m.matchedStep)!.push({ element: m.element, score: m.score });
+  }
+
+  const result: Array<{
+    stepIndex: number;
+    target: string;
+    matches: Array<{
+      rank: number;
+      selector: string;
+      score: number;
+      zone?: string;
+      rect?: { x: number; y: number; width: number; height: number };
+    }>;
+  }> = [];
+
+  for (let i = 0; i < intention.flow.length; i++) {
+    if (intention.flow[i].action === 'navigate') continue;
+    const matches = stepMatches.get(i) || [];
+    result.push({
+      stepIndex: i,
+      target: intention.flow[i].target,
+      matches: matches.slice(0, 3).map((m, j) => ({
+        rank: j + 1,
+        selector: m.element.selector,
+        score: m.score,
+        zone: m.element.semantics?.zone,
+        rect: m.element.rect,
+      })),
+    });
+  }
+
+  return result;
+}
+
 function buildWarnings(_code: string[], intention: IntentionResult, vector: VectorResult): AbstractorWarning[] {
   const warnings: AbstractorWarning[] = [];
 
@@ -115,7 +171,8 @@ function fallbackAbstract(intention: IntentionResult, vector: VectorResult): Abs
   const code: string[] = [];
 
   for (const step of intention.flow ?? []) {
-    const match = vector.matches.find((m) => m.matchedStep === intention.flow!.indexOf(step));
+    const stepIndex = intention.flow!.indexOf(step);
+    const match = vector.matches.find((m) => m.matchedStep === stepIndex);
 
     if (step.action === 'navigate') {
       code.push(`open('${step.target}')`);
@@ -148,6 +205,12 @@ function fallbackAbstract(intention: IntentionResult, vector: VectorResult): Abs
       }
     } else if (step.action === 'scroll') {
       code.push('scrollDown()');
+    } else if (step.action === 'wait') {
+      code.push('wait(2000)');
+    } else {
+      // 无匹配元素时，输出 WARNING + wait 而非静默跳过
+      code.push(`# WARNING: 未找到匹配元素 — flow.target="${step.target}"`);
+      code.push('wait(2000)');
     }
   }
 
@@ -191,6 +254,7 @@ export async function abstract(
             capabilities: vector.capabilities,
             groupedElements: vector.groupedElements,
           },
+          topMatches: buildTopMatches(intention, vector),
         }),
       },
     ], { model: callbacks.model })) {
@@ -209,6 +273,58 @@ export async function abstract(
     const code = extractPseudoCode(accumulated);
     if (code.length === 0) {
       throw new Error('LLM 响应中未找到可执行伪代码');
+    }
+
+    // 校验：非 navigate 步骤数应与 intention.flow 中非 navigate 步骤数一致
+    const expectedNonNavSteps = (intention.flow ?? []).filter((s) => s.action !== 'navigate').length;
+    const actualNonNavSteps = code.filter((line) => {
+      const m = line.match(/^([a-zA-Z][a-zA-Z0-9]*)\(/);
+      return m && m[1] !== 'navigate' && m[1] !== 'open';
+    }).length;
+
+    if (actualNonNavSteps < expectedNonNavSteps) {
+      log('llm generated fewer steps than expected, supplementing with fallback', {
+        expected: expectedNonNavSteps,
+        actual: actualNonNavSteps,
+      });
+
+      // 用 fallback 补充缺失的步骤
+      const fallbackResult = fallbackAbstract(intention, vector);
+      const mergedCode = [...code];
+
+      // 将 fallback 中 LLM 未覆盖的步骤追加到末尾
+      for (const fbLine of fallbackResult.code) {
+        const m = fbLine.match(/^([a-zA-Z][a-zA-Z0-9]*)\(/);
+        const fbMethod = m ? m[1] : '';
+        // 跳过 navigate/open（由 runner 或已有逻辑处理）
+        if (fbMethod === 'navigate' || fbMethod === 'open') continue;
+        // 如果 LLM 已生成该 selector 的操作，跳过
+        const fbSelector = fbLine.match(/'([^']+)'/)?.[1];
+        if (fbSelector) {
+          const alreadyCovered = mergedCode.some((existing) => existing.includes(`'${fbSelector}'`));
+          if (alreadyCovered) continue;
+        }
+        mergedCode.push(fbLine);
+      }
+
+      const pseudoCode = buildPseudoCodeLines(mergedCode, intention, vector);
+      const warnings = buildWarnings(mergedCode, intention, vector);
+      const complexity = mergedCode.length <= 2 ? 'low' : mergedCode.length <= 5 ? 'medium' : 'high';
+
+      log('done', { steps: mergedCode.length, method: 'llm+fallback' });
+
+      return {
+        pseudoCode,
+        generationMethod: 'llm',
+        warnings,
+        code: mergedCode,
+        summary: mergedCode.join(' -> '),
+        thinking,
+        meta: {
+          totalSteps: mergedCode.length,
+          estimatedComplexity: complexity,
+        },
+      };
     }
 
     const pseudoCode = buildPseudoCodeLines(code, intention, vector);

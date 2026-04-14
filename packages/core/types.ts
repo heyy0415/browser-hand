@@ -208,12 +208,17 @@ export interface ElementSnapshot {
   semantics?: ElementSemantics;
   embeddingText?: string;
   embedding?: number[];
+  depth?: number;
+  parentUid?: string | null;
+  childrenUids?: string[];
 }
 
 /** 页面可见文本节点 */
 export interface VisibleTextNode {
   tag: string;
   text: string;
+  rect?: ElementRect;
+  zone?: FunctionalZone;
 }
 
 /** 页面功能区域摘要 */
@@ -231,6 +236,9 @@ export interface PageSummary {
   zones: ZoneSummary[];
   hasSearch: boolean;
   hasLoginForm: boolean;
+  url?: string;
+  title?: string;
+  zonesBoundingBox?: Record<string, ElementRect>;
 }
 
 /** 页面快照（Scanner 输出） */
@@ -243,6 +251,7 @@ export interface PageSnapshot {
   elements: ElementSnapshot[];
   visibleText: VisibleTextNode[];
   pageSummary: PageSummary;
+  zonesBoundingBox?: Record<string, ElementRect>;
 }
 
 /** 旧版 ScannerResult（兼容保留） */
@@ -288,9 +297,9 @@ export interface PageCapabilities {
 
 /** 分数明细 */
 export interface ScoreBreakdown {
-  vectorScore: number;       // 向量相似度 [0, 1]
-  keywordScore: number;      // 关键词匹配 [0, 1]
-  positionalScore: number;   // 位置匹配 [0, 1]
+  vectorScore: number;       // 向量相似度 [0, 1]，权重 0.5
+  keywordScore: number;      // 关键词匹配 [0, 1]，权重 0.2
+  positionalScore: number;   // 位置与层级匹配 [0, 1]，权重 0.3
   zoneBoost: number;         // 区域加成 [0, 0.15]
 }
 
@@ -337,7 +346,7 @@ export interface VectorMatch {
   score: number;
   reason: string;
   matchedStep?: number;
-  matchType: 'embedding' | 'keyword' | 'hint';
+  matchType: 'embedding' | 'keyword' | 'hint' | 'positional';
 }
 
 /** 旧版 VectorResult（兼容保留） */

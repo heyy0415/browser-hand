@@ -256,32 +256,35 @@ function hybridSearch(
 ): VectorMatch[] {
   const matches: Map<string, VectorMatch> = new Map();
 
-  // 1. 向量检索 (权重 0.7)
+  // 1. 语义向量检索 (权重 0.5)
   for (const { element, score } of findElementsByEmbedding(queryVector, elements, topK * 2, minScore)) {
     matches.set(element.uid, {
       element,
-      score: score * 0.7,
+      score: score * 0.5,
       reason: `向量相似度: ${(score * 100).toFixed(1)}%`,
       matchType: 'embedding',
     });
   }
 
-  // 2. 关键词检索 (权重 0.3)
+  // 2. 关键词检索 (权重 0.2)
   for (const { element, score } of findElementsByKeyword(step, elements)) {
     const existing = matches.get(element.uid);
     if (existing) {
-      existing.score += score * 0.3;
+      existing.score += score * 0.2;
     } else {
       matches.set(element.uid, {
         element,
-        score: score * 0.3,
+        score: score * 0.2,
         reason: '关键词匹配',
         matchType: 'keyword',
       });
     }
   }
 
-  // 3. elementHint 精准匹配加分
+  // 3. 位置与层级评分 (权重 0.3)
+  computePositionalScore(step, matches);
+
+  // 4. elementHint 精准匹配加分
   if (step.elementHint) {
     for (const match of matches.values()) {
       let hintScore = 0;
@@ -307,6 +310,84 @@ function hybridSearch(
   return Array.from(matches.values())
     .sort((a, b) => b.score - a.score)
     .slice(0, topK);
+}
+
+/** 位置排序引擎：解析 positionalHint，对同组元素按坐标排序加分 */
+function computePositionalScore(
+  step: FlowStep,
+  matches: Map<string, VectorMatch>,
+): void {
+  const hint = step.positionalHint;
+  if (!hint) return;
+
+  const matchList = Array.from(matches.values());
+
+  if (hint.ordinal) {
+    // 按 zone 分组（scope=zone 时）或整体排序
+    const groups = new Map<string, VectorMatch[]>();
+    for (const match of matchList) {
+      const key = hint.scope === 'zone'
+        ? (match.element.semantics?.zone || 'unknown')
+        : '__all__';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(match);
+    }
+
+    // 仅在有 zoneHint 的组或全部元素中排序
+    const targetZones = step.elementHint?.zoneHint || [];
+    for (const [zone, groupMatches] of groups) {
+      // 如果有 zoneHint 且当前组不在 zoneHint 中，跳过
+      if (hint.scope === 'zone' && targetZones.length > 0 && !targetZones.includes(zone as any)) continue;
+
+      // 按 y 坐标排序
+      groupMatches.sort((a, b) => {
+        if (hint.ordinal! > 0) return a.element.rect.y - b.element.rect.y; // 升序：取最上面的
+        return b.element.rect.y - a.element.rect.y; // 降序：取最下面的
+      });
+
+      // 对排序靠前的元素加分
+      const absOrdinal = Math.abs(hint.ordinal);
+      for (let i = 0; i < groupMatches.length; i++) {
+        if (i < absOrdinal) {
+          // 越靠前加分越多
+          const bonus = 0.3 * (1 - i / Math.max(groupMatches.length, 1));
+          groupMatches[i].score += bonus;
+          groupMatches[i].matchType = 'positional';
+          groupMatches[i].reason += ` + 位置排序(第${i + 1})`;
+        }
+      }
+    }
+  }
+
+  if (hint.direction) {
+    // 方向提示：根据方向给元素加分
+    for (const match of matchList) {
+      const rect = match.element.rect;
+      const viewport = { width: 1920, height: 1080 }; // 默认视口
+      let dirScore = 0;
+
+      switch (hint.direction) {
+        case 'top':
+          dirScore = 0.15 * (1 - rect.y / viewport.height);
+          break;
+        case 'bottom':
+          dirScore = 0.15 * (rect.y / viewport.height);
+          break;
+        case 'left':
+          dirScore = 0.15 * (1 - rect.x / viewport.width);
+          break;
+        case 'right':
+          dirScore = 0.15 * (rect.x / viewport.width);
+          break;
+      }
+
+      if (dirScore > 0) {
+        match.score += dirScore;
+        if (match.matchType !== 'positional') match.matchType = 'positional';
+        match.reason += ` + 方向匹配(${hint.direction})`;
+      }
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -457,14 +538,47 @@ export async function vectorize(
 
     log(`embedding step ${stepIndex}: ${step.action}`);
 
-    // 硬过滤回调
+    // 硬过滤
     const beforeFilter = scan.elements.length;
-    const filteredElements = scan.elements.filter((el) => {
-      if (step.elementHint?.interactionHint && el.semantics?.interactionHint !== step.elementHint.interactionHint) {
+    const filters: Array<{ rule: string; removed: number }> = [];
+
+    let filteredElements = scan.elements.filter((el) => {
+      // interactionHint 软过滤：允许相似类型通过
+      if (step.elementHint?.interactionHint) {
+        const hint = step.elementHint.interactionHint;
+        const elHint = el.semantics?.interactionHint;
+        // 完全匹配：通过
+        if (elHint === hint) return true;
+        // 交互类型兼容性映射：submit 和 action 互通（按钮既可能是 submit 也可能是 action）
+        const compatibleHints: Record<string, string[]> = {
+          submit: ['action'],
+          action: ['submit', 'cancel'],
+          input: ['selection'],
+          selection: ['input'],
+        };
+        if (compatibleHints[hint]?.includes(elHint || '')) return true;
+        // 不兼容：过滤掉
         return false;
       }
       return true;
     });
+    const interactionRemoved = beforeFilter - filteredElements.length;
+    if (interactionRemoved > 0) {
+      filters.push({ rule: `interactionHint=${step.elementHint?.interactionHint || '*'}`, removed: interactionRemoved });
+    }
+
+    // 层级约束硬过滤：zoneHint 含 modal 时，过滤 parentContext 不匹配的元素
+    if (step.elementHint?.zoneHint?.length && step.elementHint.zoneHint.includes('modal' as any)) {
+      const beforeLayerFilter = filteredElements.length;
+      filteredElements = filteredElements.filter((el) =>
+        el.semantics?.zone === 'modal' || (el.semantics?.parentContext && /登录|弹窗|模态/i.test(el.semantics.parentContext))
+      );
+      const layerRemoved = beforeLayerFilter - filteredElements.length;
+      if (layerRemoved > 0) {
+        filters.push({ rule: 'layerConstraint=modal', removed: layerRemoved });
+      }
+    }
+
     const afterFilter = filteredElements.length;
 
     if (options.onFiltering) {
@@ -472,7 +586,7 @@ export async function vectorize(
         stepIndex,
         before: beforeFilter,
         after: afterFilter,
-        filters: [{ rule: `interactionHint=${step.elementHint?.interactionHint || '*'}`, removed: beforeFilter - afterFilter }],
+        filters,
       });
     }
 
@@ -487,11 +601,14 @@ export async function vectorize(
       });
     }
 
-    const stepMatches = hybridSearch(step, queryVector, scan.elements, Math.ceil(topK / intention.flow.length), minScore);
+    // 使用过滤后的元素（修复 Bug：原版使用 scan.elements 导致过滤无效）
+    const stepMatches = hybridSearch(step, queryVector, filteredElements, Math.ceil(topK / intention.flow.length), minScore);
 
     for (const match of stepMatches) {
-      if (!matchedElementIds.has(match.element.uid)) {
-        matchedElementIds.add(match.element.uid);
+      // 允许同一元素被不同步骤匹配（去重仅针对相同 stepIndex）
+      const dedupeKey = `${match.element.uid}:${stepIndex}`;
+      if (!matchedElementIds.has(dedupeKey)) {
+        matchedElementIds.add(dedupeKey);
         match.matchedStep = stepIndex;
         allMatches.push(match);
       }
@@ -548,13 +665,24 @@ export async function processVector(
       target: '',
       totalCandidates: scan.elements.length,
       afterHardFilter: vectorResult.elements.length,
-      results: vectorResult.matches.slice(0, 5).map((m) => ({
-        rank: 0,
-        selector: m.element.selector,
-        label: m.element.label,
-        score: m.score,
-        breakdown: { vectorScore: m.score, keywordScore: 0, positionalScore: 0, zoneBoost: 0 },
-      })),
+      results: vectorResult.matches.slice(0, 5).map((m, i) => {
+        // 根据 matchType 推算分数明细
+        const isEmbedding = m.matchType === 'embedding' || m.matchType === 'hint' || m.matchType === 'positional';
+        const isKeyword = m.matchType === 'keyword';
+        const isPositional = m.matchType === 'positional';
+        return {
+          rank: i + 1,
+          selector: m.element.selector,
+          label: m.element.label,
+          score: m.score,
+          breakdown: {
+            vectorScore: isEmbedding ? Math.min(m.score / 0.5, 1) : 0,
+            keywordScore: isKeyword ? Math.min(m.score / 0.2, 1) : 0,
+            positionalScore: isPositional ? 0.3 : 0,
+            zoneBoost: 0,
+          },
+        };
+      }),
       elapsedMs: 0,
     }, sessionId);
     close();
