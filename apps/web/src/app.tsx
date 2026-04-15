@@ -19,7 +19,7 @@ const App: FC = () => {
   } = useTask();
 
   return (
-    <div className="b-handapp">
+    <div className="bh-app">
       <Sidebar
         sessions={sessions}
         activeSessionId={activeSessionId}

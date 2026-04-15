@@ -3,20 +3,41 @@
  * - 使用 Bun.build() 按需打包 React 应用
  * - 代理 /api 请求到后端
  * - 支持静态文件服务与热重载
+ * - 监听 src/ 变化自动重新打包并推送刷新
  */
 
 export {};
 
+import { watch } from 'node:fs';
+import { join } from 'node:path';
+
 const PORT = Number(process.env.WEB_PORT) || 5173;
 const API_TARGET = process.env.API_URL || 'http://localhost:3000';
 const BUILD_DIR = `${import.meta.dir}/.dev-cache`;
+const SRC_DIR = join(import.meta.dir, 'src');
 
 const indexHtml = await Bun.file('index.html').text();
 
-let buildDone = false;
+// ── 热重载：管理 SSE 客户端连接 ──────────────────────────────────
 
-async function ensureBuild() {
-  if (buildDone) return;
+const hotClients = new Set<ReadableStreamDefaultController>();
+let buildHash = Date.now();
+
+function broadcastReload() {
+  buildHash = Date.now();
+  const encoder = new TextEncoder();
+  for (const ctrl of hotClients) {
+    try {
+      ctrl.enqueue(encoder.encode(`event: reload\ndata: ${buildHash}\n\n`));
+    } catch {
+      hotClients.delete(ctrl);
+    }
+  }
+}
+
+// ── 构建逻辑 ────────────────────────────────────────────────────
+
+async function doBuild(): Promise<boolean> {
   const result = await Bun.build({
     entrypoints: ['src/main.tsx'],
     outdir: BUILD_DIR,
@@ -29,10 +50,45 @@ async function ensureBuild() {
   });
   if (!result.success) {
     console.error('[web] Build failed:', result.logs);
-    return;
+    return false;
   }
-  buildDone = true;
+  return true;
 }
+
+// 初次构建
+await doBuild();
+console.log('[web] Initial build done');
+
+// ── 文件监听：src/ 变化时重新打包 + 推送刷新 ─────────────────────
+
+let rebuildTimer: ReturnType<typeof setTimeout> | null = null;
+
+function onFileChange(_event: string, filename: string | null) {
+  if (!filename) return;
+  // 忽略临时文件和 .d.ts
+  if (filename.endsWith('.d.ts') || filename.startsWith('.')) return;
+
+  // 防抖：300ms 内多次变更只触发一次构建
+  if (rebuildTimer) clearTimeout(rebuildTimer);
+  rebuildTimer = setTimeout(async () => {
+    console.log(`[web] File changed: ${filename}, rebuilding...`);
+    const ok = await doBuild();
+    if (ok) {
+      console.log('[web] Rebuild done, notifying clients');
+      broadcastReload();
+    }
+    rebuildTimer = null;
+  }, 300);
+}
+
+// 递归监听 src 目录
+watch(SRC_DIR, { recursive: true }, onFileChange);
+console.log(`[web] Watching ${SRC_DIR} for changes`);
+
+// 也监听 index.html 变化
+watch(join(import.meta.dir, 'index.html'), onFileChange);
+
+// ── MIME 类型 ───────────────────────────────────────────────────
 
 const MIME_MAP: Record<string, string> = {
   '.js': 'application/javascript; charset=utf-8',
@@ -54,6 +110,8 @@ function getMimeType(pathname: string): string {
   return MIME_MAP[pathname.slice(dot)] || 'application/octet-stream';
 }
 
+// ── HTTP 服务 ───────────────────────────────────────────────────
+
 Bun.serve({
   port: PORT,
   async fetch(req) {
@@ -69,13 +127,16 @@ Bun.serve({
       });
     }
 
-    // HTML 入口
+    // HTML 入口（注入热重载脚本）
     if (url.pathname === '/' || url.pathname === '/index.html') {
       const html = indexHtml.replace(
         '</head>',
         `<script>
           const es = new EventSource('/__hot__');
-          es.addEventListener('message', () => { location.reload(); });
+          es.addEventListener('reload', () => {
+            console.log('[hot] Reloading...');
+            location.reload();
+          });
         </script></head>`,
       );
       return new Response(html, {
@@ -87,14 +148,25 @@ Bun.serve({
     if (url.pathname === '/__hot__') {
       const stream = new ReadableStream({
         start(controller) {
+          // 发送初始连接事件（使用命名事件，避免触发 reload）
           const encoder = new TextEncoder();
-          const id = setInterval(() => {
-            controller.enqueue(encoder.encode(`data: ${Date.now()}\n\n`));
-          }, 30_000);
+          controller.enqueue(encoder.encode(`event: connected\ndata: ${buildHash}\n\n`));
+          hotClients.add(controller);
+
+          // 心跳保活
+          const heartbeat = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(`: heartbeat\n\n`));
+            } catch {
+              hotClients.delete(controller);
+              clearInterval(heartbeat);
+            }
+          }, 15_000);
 
           req.signal.addEventListener('abort', () => {
-            clearInterval(id);
-            controller.close();
+            hotClients.delete(controller);
+            clearInterval(heartbeat);
+            try { controller.close(); } catch {}
           });
         },
       });
@@ -109,7 +181,6 @@ Bun.serve({
     }
 
     // 构建产物（main.js, main.css, assets）
-    await ensureBuild();
     const buildPath = `${BUILD_DIR}${url.pathname}`;
     const buildFile = Bun.file(buildPath);
     if (await buildFile.exists()) {
@@ -137,4 +208,4 @@ Bun.serve({
   },
 });
 
-console.log(`前端开发服务器：http://localhost:${PORT}`);
+console.log(`[web] Dev server: http://localhost:${PORT}`);

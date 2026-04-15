@@ -3,6 +3,15 @@
 /** 流水线层级状态 */
 export type StepState = 'pending' | 'running' | 'done' | 'error';
 
+/** 流水线整体状态 */
+export interface PipelineState {
+  intention: StepState;
+  scanner: StepState;
+  vector: StepState;
+  abstractor: StepState;
+  runner: StepState;
+}
+
 /** Runner 执行步骤信息 */
 export interface RunnerStepInfo {
   lineNumber: number;
@@ -12,6 +21,10 @@ export interface RunnerStepInfo {
   elapsedMs?: number;
   error?: string;
   screenshot?: string;
+  /** 该步骤提取到的文本内容 */
+  extractedText?: string;
+  /** 该步骤截图的 base64 */
+  extractedScreenshot?: string;
 }
 
 /** 提取内容 */
@@ -19,15 +32,6 @@ export interface ExtractedContent {
   type: 'text' | 'screenshot' | 'mixed';
   textResults: Array<{ selector: string; text: string; lineNumber: number }>;
   screenshotResults: string[];
-}
-
-/** 流水线各层状态 */
-export interface PipelineState {
-  intention: StepState;
-  scanner: StepState;
-  vector: StepState;
-  abstractor: StepState;
-  runner: StepState;
 }
 
 /** 思考过程状态 */
@@ -52,7 +56,7 @@ export interface Message {
   // 思考过程
   thinking?: ThinkingState;
 
-  // 五层流水线状态
+  // 流水线状态
   pipeline?: PipelineState;
 
   // Runner 执行步骤

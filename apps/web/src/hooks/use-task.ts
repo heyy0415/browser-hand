@@ -208,7 +208,7 @@ export function useTask() {
             const d = data as { lineNumber: number; code: string; status: string; elapsedMs: number; screenshot?: string };
             const newSteps = (message.runnerSteps || []).map((step) =>
               step.lineNumber === d.lineNumber
-                ? { ...step, status: 'success' as const, elapsedMs: d.elapsedMs, screenshot: d.screenshot }
+                ? { ...step, status: 'success' as const, elapsedMs: d.elapsedMs, screenshot: d.screenshot, extractedScreenshot: d.screenshot }
                 : step,
             );
             return {
@@ -242,9 +242,18 @@ export function useTask() {
               type: currentContent.screenshotResults.length > 0 ? 'mixed' : 'text',
               textResults: [...currentContent.textResults, { selector: d.selector, text: d.text, lineNumber: d.lineNumber }],
             };
+
+            // 同时将提取内容绑定到对应 runner step 上，以便内联展示
+            const newSteps = (message.runnerSteps || []).map((step) =>
+              step.lineNumber === d.lineNumber
+                ? { ...step, extractedText: d.text }
+                : step,
+            );
+
             return {
               ...message,
               extractedContent: newContent,
+              runnerSteps: newSteps,
             };
           }
 

@@ -30,32 +30,38 @@ export const ChatLayout: FC<ChatLayoutProps> = ({
   const showWelcome = messages.length === 0;
 
   return (
-    <main className="b-handmain">
-      <header className="b-handtopbar">
-        <select
-          className="b-handmodel-select"
-          value={model}
-          onChange={(e) => onModelChange(e.target.value)}
-        >
-          {MODEL_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </select>
+    <main className="bh-main">
+      <header className="bh-topbar">
+        <div className="bh-model-select-wrap">
+          <select
+            className="bh-model-select"
+            value={model}
+            onChange={(e) => onModelChange(e.target.value)}
+          >
+            {MODEL_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <span className="bh-model-select-arrow">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </span>
+        </div>
       </header>
 
-      <section className="b-handchat-area">
+      <section className="bh-chat-area">
         {showWelcome ? (
-          <div className="b-handwelcome">
-            <p className="b-handwelcome-subtitle">
-              准备好探索无限可能
-            </p>
-            <div className="b-handquick-prompts">
+          <div className="bh-welcome">
+            <h1 className="bh-welcome-title">你好，我是 BrowserHand</h1>
+            <p className="bh-welcome-subtitle">我可以帮你操控浏览器，完成搜索、点击、填表等任务</p>
+            <div className="bh-quick-prompts">
               {QUICK_PROMPTS.map((item) => (
                 <button
                   key={item}
-                  className="b-handprompt"
+                  className="bh-quick-prompt"
                   type="button"
                   onClick={() => void onSubmit(item)}
                 >
@@ -71,7 +77,6 @@ export const ChatLayout: FC<ChatLayoutProps> = ({
 
       <InputBar loading={loading} onSubmit={onSubmit} />
 
-      {/* 全局澄清问题弹窗 */}
       {clarificationQuestion && !loading && (
         <ClarificationModal
           reply={clarificationQuestion.reply}
