@@ -1,2 +1,40 @@
-tsc --noEmit
-bunx lint-staged
+#!/usr/bin/env sh
+
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║       🔍 Pre-commit checks running       ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""
+
+# ── Step 1: TypeScript type check ──
+echo "┌─ [1/2] TypeScript type checking (tsc --noEmit) ..."
+echo "│"
+tsc --noEmit 2>&1
+tsc_result=$?
+echo "│"
+if [ $tsc_result -eq 0 ]; then
+  echo "└─ ✅ TypeScript check passed"
+else
+  echo "└─ ❌ TypeScript check failed"
+  exit 1
+fi
+echo ""
+
+# ── Step 2: Lint staged files ──
+echo "┌─ [2/2] Linting staged files (lint-staged) ..."
+echo "│"
+bunx lint-staged 2>&1
+lint_result=$?
+echo "│"
+if [ $lint_result -eq 0 ]; then
+  echo "└─ ✅ Lint check passed"
+else
+  echo "└─ ❌ Lint check failed"
+  exit 1
+fi
+echo ""
+
+echo "╔══════════════════════════════════════════╗"
+echo "║       ✅ All checks passed! Commit OK     ║"
+echo "╚══════════════════════════════════════════╝"
+echo ""

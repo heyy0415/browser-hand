@@ -546,6 +546,13 @@ const EXTRACTION_SCRIPT = `
     };
   }
 
+  // ── DOM 深度计算 ──────────────────────────────
+  function computeDepth(el) {
+    var d = 0, p = el.parentElement;
+    while (p) { d++; p = p.parentElement; }
+    return d;
+  }
+
   // ── 主扫描（可交互元素） ─────────────────────
   var SELECTORS = [
     'a[href]', 'button', 'input', 'textarea', 'select',
@@ -561,6 +568,7 @@ const EXTRACTION_SCRIPT = `
 
   var seen = new Set();
   var elements = [];
+  var domElements = [];
 
   for (var si = 0; si < SELECTORS.length; si++) {
     var nodes;
@@ -586,8 +594,45 @@ const EXTRACTION_SCRIPT = `
         state: getState(el),
         rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) },
         semantics: extractSemantics(el, role, label),
+        depth: computeDepth(el),
       });
+      domElements.push(el);
     }
+  }
+
+  // ── DOM 层级关系计算 ──────────────────────────
+  var domToIdx = new Map();
+  for (var di = 0; di < domElements.length; di++) {
+    domToIdx.set(domElements[di], di);
+  }
+  for (var di = 0; di < elements.length; di++) {
+    var pEl = domElements[di].parentElement;
+    while (pEl && pEl !== document.body && pEl !== document.documentElement) {
+      if (domToIdx.has(pEl)) {
+        elements[di].parentIdx = domToIdx.get(pEl);
+        break;
+      }
+      pEl = pEl.parentElement;
+    }
+  }
+  domElements = []; // 释放 DOM 引用
+
+  // ── 区域包围盒计算 ────────────────────────────
+  var zonesBoundingBox = {};
+  for (var zi = 0; zi < elements.length; zi++) {
+    var zone = elements[zi].semantics && elements[zi].semantics.zone ? elements[zi].semantics.zone : 'unknown';
+    if (!zonesBoundingBox[zone]) {
+      zonesBoundingBox[zone] = { x: Infinity, y: Infinity, x2: -Infinity, y2: -Infinity };
+    }
+    var zr = elements[zi].rect;
+    zonesBoundingBox[zone].x = Math.min(zonesBoundingBox[zone].x, zr.x);
+    zonesBoundingBox[zone].y = Math.min(zonesBoundingBox[zone].y, zr.y);
+    zonesBoundingBox[zone].x2 = Math.max(zonesBoundingBox[zone].x2, zr.x + zr.width);
+    zonesBoundingBox[zone].y2 = Math.max(zonesBoundingBox[zone].y2, zr.y + zr.height);
+  }
+  for (var zn in zonesBoundingBox) {
+    var bb = zonesBoundingBox[zn];
+    zonesBoundingBox[zn] = { x: bb.x, y: bb.y, width: bb.x2 - bb.x, height: bb.y2 - bb.y };
   }
 
   // ── 可见文本扫描（非交互元素，提供页面内容上下文） ──
@@ -602,9 +647,12 @@ const EXTRACTION_SCRIPT = `
       if (!isVisible(vel)) continue;
       var vtxt = (vel.textContent || '').trim().replace(/\\s+/g, ' ');
       if (vtxt.length > 2 && vtxt.length < 300) {
+        var vrect = vel.getBoundingClientRect();
         visibleText.push({
           tag: vel.tagName.toLowerCase(),
           text: vtxt.substring(0, 150),
+          rect: { x: Math.round(vrect.x), y: Math.round(vrect.y), width: Math.round(vrect.width), height: Math.round(vrect.height) },
+          zone: detectFunctionalZone(vel),
         });
         if (visibleText.length >= 50) break;
       }
@@ -620,11 +668,12 @@ const EXTRACTION_SCRIPT = `
     if (!isVisible(img)) continue;
     var alt = (img.getAttribute('alt') || '').trim();
     if (alt.length > 0 && alt.length < 200) {
-      visibleText.push({ tag: 'img', text: alt });
+      var irect = img.getBoundingClientRect();
+      visibleText.push({ tag: 'img', text: alt, rect: { x: Math.round(irect.x), y: Math.round(irect.y), width: Math.round(irect.width), height: Math.round(irect.height) }, zone: detectFunctionalZone(img) });
     }
   }
 
-  return { elements: elements, visibleText: visibleText };
+  return { elements: elements, visibleText: visibleText, zonesBoundingBox: zonesBoundingBox };
 })();
 `;
 
@@ -685,6 +734,7 @@ const EXTRACTION_SCRIPT = `
     log('progress', 'scanning elements');
     const allElements = [];
     const allVisibleText = [];
+    const allZonesBoundingBox = {};
     let globalIndex = 0;
 
     async function scanFrame(frame, framePath) {
@@ -696,9 +746,13 @@ const EXTRACTION_SCRIPT = `
         return;
       }
 
+      // 记录本帧元素起始索引，用于 parentIdx → parentUid 映射
+      const frameStartIdx = allElements.length;
+
       for (const el of (result.elements || [])) {
+        const uid = `${PAGE_ID}:${framePath.join(':')}:${globalIndex++}`;
         allElements.push({
-          uid: `${PAGE_ID}:${framePath.join(':')}:${globalIndex++}`,
+          uid,
           tag: el.tag,
           role: el.role,
           label: el.label,
@@ -707,11 +761,32 @@ const EXTRACTION_SCRIPT = `
           state: el.state,
           rect: el.rect,
           framePath: [...framePath],
+          depth: el.depth,
+          semantics: el.semantics,
+          parentLocalIdx: el.parentIdx,
+          frameStartIdx,
         });
       }
 
       for (const vt of (result.visibleText || [])) {
-        allVisibleText.push({ tag: vt.tag, text: vt.text });
+        allVisibleText.push({ tag: vt.tag, text: vt.text, rect: vt.rect, zone: vt.zone });
+      }
+
+      // 合并 zonesBoundingBox
+      if (result.zonesBoundingBox) {
+        for (const [zone, bb] of Object.entries(result.zonesBoundingBox)) {
+          if (!allZonesBoundingBox[zone]) {
+            allZonesBoundingBox[zone] = bb;
+          } else {
+            const existing = allZonesBoundingBox[zone];
+            const x2 = Math.max(existing.x + existing.width, (bb).x + (bb).width);
+            const y2 = Math.max(existing.y + existing.height, (bb).y + (bb).height);
+            existing.x = Math.min(existing.x, (bb).x);
+            existing.y = Math.min(existing.y, (bb).y);
+            existing.width = x2 - existing.x;
+            existing.height = y2 - existing.y;
+          }
+        }
       }
 
       // 递归子帧
@@ -743,9 +818,11 @@ const EXTRACTION_SCRIPT = `
       if (scannedSet.has(path.join('.'))) continue;
       let result;
       try { result = await frame.evaluate(EXTRACTION_SCRIPT); } catch { continue; }
+      const frameStartIdx = allElements.length;
       for (const el of (result.elements || [])) {
+        const uid = `${PAGE_ID}:${path.join(':')}:${globalIndex++}`;
         allElements.push({
-          uid: `${PAGE_ID}:${path.join(':')}:${globalIndex++}`,
+          uid,
           tag: el.tag,
           role: el.role,
           label: el.label,
@@ -754,11 +831,58 @@ const EXTRACTION_SCRIPT = `
           state: el.state,
           rect: el.rect,
           framePath: [...path],
+          depth: el.depth,
+          semantics: el.semantics,
+          parentLocalIdx: el.parentIdx,
+          frameStartIdx,
         });
       }
       for (const vt of (result.visibleText || [])) {
-        allVisibleText.push({ tag: vt.tag, text: vt.text });
+        allVisibleText.push({ tag: vt.tag, text: vt.text, rect: vt.rect, zone: vt.zone });
       }
+      // 合并 zonesBoundingBox
+      if (result.zonesBoundingBox) {
+        for (const [zone, bb] of Object.entries(result.zonesBoundingBox)) {
+          if (!allZonesBoundingBox[zone]) {
+            allZonesBoundingBox[zone] = bb;
+          } else {
+            const existing = allZonesBoundingBox[zone];
+            const x2 = Math.max(existing.x + existing.width, (bb).x + (bb).width);
+            const y2 = Math.max(existing.y + existing.height, (bb).y + (bb).height);
+            existing.x = Math.min(existing.x, (bb).x);
+            existing.y = Math.min(existing.y, (bb).y);
+            existing.width = x2 - existing.x;
+            existing.height = y2 - existing.y;
+          }
+        }
+      }
+    }
+
+    // ── 解析 parentLocalIdx → parentUid，计算 childrenUids ──
+    for (let i = 0; i < allElements.length; i++) {
+      const el = allElements[i];
+      const localIdx = el.parentLocalIdx;
+      if (localIdx !== undefined && localIdx !== null) {
+        const parentUid = allElements[el.frameStartIdx + localIdx]?.uid || null;
+        el.parentUid = parentUid;
+        // 在父元素中注册 childrenUid
+        if (parentUid) {
+          const parentEl = allElements[el.frameStartIdx + localIdx];
+          if (parentEl) {
+            if (!parentEl.childrenUids) parentEl.childrenUids = [];
+            parentEl.childrenUids.push(el.uid);
+          }
+        }
+      } else {
+        el.parentUid = null;
+      }
+      // 清理临时字段
+      delete el.parentLocalIdx;
+      delete el.frameStartIdx;
+    }
+    // 为没有 childrenUids 的元素补空数组
+    for (let i = 0; i < allElements.length; i++) {
+      if (!allElements[i].childrenUids) allElements[i].childrenUids = [];
     }
 
     // ── 输出结果 ──
@@ -768,6 +892,7 @@ const EXTRACTION_SCRIPT = `
       title: pageTitle,
       elements: allElements,
       visibleText: allVisibleText,
+      zonesBoundingBox: allZonesBoundingBox,
     };
 
     log('progress', `found ${allElements.length} elements`);

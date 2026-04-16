@@ -4,20 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "bun --watch dev-server.ts",
+    "build": "bun build src/main.tsx --outdir ../../dist/web --minify --target browser",
+    "preview": "bun --watch dev-server.ts"
   },
   "dependencies": {
-    "@browser-hand/engine": "workspace:*",
+    "@browser-hand/core": "workspace:*",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.1",
-    "typescript": "^6.0.2",
-    "vite": "^8.0.3"
+    "typescript": "^6.0.2"
   }
 }
