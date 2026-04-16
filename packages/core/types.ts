@@ -1,4 +1,4 @@
-/** @browser-hand/core — 类型定义 */
+/** @browser-hand/core — 类型定义 (v2.0 双轨分离 + 智能网关 + 事件驱动重入) */
 
 // ═══════════════════════════════════════════════════════════════════════
 // 枚举与基础类型
@@ -65,6 +65,34 @@ export type ZoneType =
   | 'modal'
   | 'unknown';
 
+/** 元素的功能区域类型（Scanner 内部使用） */
+export type FunctionalZone =
+  | 'navigation'
+  | 'search'
+  | 'main-content'
+  | 'sidebar'
+  | 'header'
+  | 'footer'
+  | 'modal'
+  | 'form'
+  | 'list'
+  | 'card'
+  | 'trending'
+  | 'unknown';
+
+/** 空间词：将视口坐标离散化为 LLM 可理解的空间位置 */
+export type SpatialWord =
+  | 'top-left' | 'top-center' | 'top-right'
+  | 'mid-left' | 'mid-center' | 'mid-right'
+  | 'bottom-left' | 'bottom-center' | 'bottom-right';
+
+/** 根据视口归一化坐标计算离散空间词 */
+export function computeSpatialWord(xRatio: number, yRatio: number): SpatialWord {
+  const yBucket = yRatio < 0.33 ? 'top' : yRatio < 0.66 ? 'mid' : 'bottom';
+  const xBucket = xRatio < 0.33 ? 'left' : xRatio < 0.66 ? 'center' : 'right';
+  return `${yBucket}-${xBucket}` as SpatialWord;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Intention 层类型定义
 // ═══════════════════════════════════════════════════════════════════════
@@ -94,7 +122,7 @@ export interface PositionalHint {
   referenceTarget?: string;
 }
 
-/** 操作步骤结构（对齐 README FlowStep） */
+/** 操作步骤结构 */
 export interface FlowStep {
   /** 标准化的动作类型 */
   action: ActionType;
@@ -110,22 +138,11 @@ export interface FlowStep {
   elementHint: ElementHint;
   /** 位置概念提示 */
   positionalHint: PositionalHint | null;
+  /** 预期祖先路径（如 "header > nav"） */
+  ancestorPath?: string;
   /** 预期结果描述 */
   expectedOutcome: string;
   /** 用于向量检索的查询文本（运行时生成） */
-  searchQuery?: string;
-}
-
-/** 旧版 IntentionStep（兼容保留） */
-export interface IntentionStep {
-  action: ActionType;
-  category: StepCategory;
-  target: string;
-  targetType: TargetType;
-  desc: string;
-  value?: string;
-  elementHint?: ElementHint;
-  expectedOutcome?: string;
   searchQuery?: string;
 }
 
@@ -139,7 +156,7 @@ export interface IntentionResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Scanner 层类型定义
+// Scanner 层类型定义（v2.0 双轨分离）
 // ═══════════════════════════════════════════════════════════════════════
 
 export type SemanticRole =
@@ -170,47 +187,37 @@ export interface ElementRect {
   height: number;
 }
 
-/** 元素的功能区域类型 */
-export type FunctionalZone =
-  | 'navigation'
-  | 'search'
-  | 'main-content'
-  | 'sidebar'
-  | 'header'
-  | 'footer'
-  | 'modal'
-  | 'form'
-  | 'list'
-  | 'card'
-  | 'trending'
-  | 'unknown';
+/**
+ * 轨道一：给 LLM 看的极简纯文本（包含空间基因）
+ * 每行以 [index] 前缀编号，与 ElementMap 索引对应
+ * 示例：
+ * [0] <header data-zone="header" data-pos="top-center">
+ * [1] <input placeholder="搜索" data-zone="search" data-pos="top-center">
+ * [2] <button data-zone="search" data-pos="top-center">搜索</button>
+ */
+export type DomText = string;
 
-/** 元素的语义描述，用于让 LLM 理解元素功能 */
-export interface ElementSemantics {
-  description: string;
-  zone: FunctionalZone;
-  parentContext?: string;
-  relatedLabel?: string;
-  visualHints?: string[];
-  interactionHint?: 'submit' | 'cancel' | 'navigation' | 'action' | 'input' | 'selection' | 'toggle';
-}
-
-export interface ElementSnapshot {
-  uid: string;
-  tag: string;
-  role: SemanticRole;
-  selector: string;
-  label: string;
-  state: Record<string, unknown>;
-  framePath: string[];
-  text: string;
-  rect: ElementRect;
-  semantics?: ElementSemantics;
-  embeddingText?: string;
-  embedding?: number[];
-  depth?: number;
-  parentUid?: string | null;
-  childrenUids?: string[];
+/**
+ * 轨道二：给 Vector/Runner 算法用的隐藏映射表
+ * index 与 domText 中的 [index] 前缀一一对应
+ */
+export interface ElementMap {
+  [index: number]: {
+    /** 可穿透 Shadow DOM 的 CSS Selector（含 >>> 穿透符） */
+    selector: string;
+    /** 像素坐标 + 视口归一化 */
+    rect: { x: number; y: number; w: number; h: number; centerY: number; yRatio: number };
+    /** 功能区 (header/footer/modal/search/...) */
+    zone: string;
+    /** 交互角色 (button/input/link/searchbox/...) */
+    role: string;
+    /** 原始拼接文本（用于 Plan A 算法 includes 匹配） */
+    rawText: string;
+    /** 优化过的 Embedding 文本（仅 Plan B 使用） */
+    embeddingText: string;
+    /** Shadow DOM 宿主链（从外到内），如 ["my-dialog", "x-form"]；无 Shadow DOM 时省略 */
+    shadowHosts?: string[];
+  };
 }
 
 /** 页面可见文本节点 */
@@ -241,29 +248,28 @@ export interface PageSummary {
   zonesBoundingBox?: Record<string, ElementRect>;
 }
 
-/** 页面快照（Scanner 输出） */
-export interface PageSnapshot {
-  url: string;
-  title: string;
-  viewport: { width: number; height: number };
-  timestamp: number;
-  totalElements: number;
-  elements: ElementSnapshot[];
-  visibleText: VisibleTextNode[];
-  pageSummary: PageSummary;
-  zonesBoundingBox?: Record<string, ElementRect>;
-}
-
-/** 旧版 ScannerResult（兼容保留） */
+/**
+ * Scanner 输出（v2.0 双轨分离）
+ * domText 给 LLM，elementMap 给算法
+ */
 export interface ScannerResult {
   url: string;
   title: string;
-  elements: ElementSnapshot[];
+  /** 轨道一：带空间属性的极简纯文本 */
+  domText: DomText;
+  /** 轨道二：结构化坐标元数据 */
+  elementMap: ElementMap;
+  /** 页面可见文本（辅助上下文） */
   visibleText: VisibleTextNode[];
-  viewport?: { width: number; height: number };
-  timestamp?: number;
-  totalElements?: number;
-  pageSummary?: PageSummary;
+  /** 视口尺寸 */
+  viewport: { width: number; height: number };
+  timestamp: number;
+  /** 扫描到的元素总数 */
+  totalElements: number;
+  /** 页面摘要 */
+  pageSummary: PageSummary;
+  /** 区域包围盒 */
+  zonesBoundingBox: Record<string, ElementRect>;
 }
 
 export interface ScanOptions {
@@ -273,7 +279,7 @@ export interface ScanOptions {
   scanFrames?: boolean;
 }
 
-/** 页面功能区域描述（旧版兼容） */
+/** 页面功能区域描述 */
 export interface PageZone {
   zone: FunctionalZone;
   elementCount: number;
@@ -292,92 +298,45 @@ export interface PageCapabilities {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Vector 层类型定义
+// Vector 层类型定义（v2.0 智能网关）
 // ═══════════════════════════════════════════════════════════════════════
 
-/** 分数明细 */
-export interface ScoreBreakdown {
-  vectorScore: number;       // 向量相似度 [0, 1]，权重 0.5
-  keywordScore: number;      // 关键词匹配 [0, 1]，权重 0.2
-  positionalScore: number;   // 位置与层级匹配 [0, 1]，权重 0.3
-  zoneBoost: number;         // 区域加成 [0, 0.15]
-}
+/** Vector 网关路由类型 */
+export type VectorGatewayRoute = 'PLAN_A_HARDFILTER' | 'PLAN_B_SEMANTIC';
 
-/** 排序后的匹配元素 */
-export interface RankedElement {
-  element: ElementSnapshot;
-  score: number;
-  breakdown: ScoreBreakdown;
-  rank: number;
-}
-
-/** 检索指标 */
-export interface SearchMetrics {
-  filterBefore: number;
-  filterAfter: number;
-  vectorComputeMs: number;
-  totalMs: number;
-}
-
-/** 过滤后的快照（传给 Abstractor） */
-export interface FilteredSnapshot {
-  url: string;
-  stepIndex: number;
-  target: string;
-  topMatch: RankedElement | null;
-  candidates: RankedElement[];
-  excluded: number;
-  allElements: ElementSnapshot[];
-}
-
-/** Vector 层输出 */
-export interface VectorOutput {
-  stepIndex: number;
-  target: string;
-  totalCandidates: number;
-  afterHardFilter: number;
-  results: RankedElement[];
-  searchMetrics: SearchMetrics;
-}
-
-/** 旧版 VectorMatch（兼容保留） */
-export interface VectorMatch {
-  element: ElementSnapshot;
-  score: number;
-  reason: string;
-  matchedStep?: number;
-  matchType: 'embedding' | 'keyword' | 'hint' | 'positional';
-}
-
-/** 旧版 VectorResult（兼容保留） */
-export interface VectorResult {
-  url: string;
-  title: string;
-  matches: VectorMatch[];
-  elements: ElementSnapshot[];
-  visibleText: VisibleTextNode[];
-  capabilities?: PageCapabilities;
-  groupedElements?: Record<string, ElementSnapshot[]>;
-  queryEmbedding?: number[];
-  success: boolean;
-  message: string;
-}
-
-export interface VectorOptions {
-  topK?: number;
-  minScore?: number;
+/** Vector 智能网关输出 */
+export interface VectorGatewayResult {
+  /** 过滤后的精简 domText */
+  filteredDomText: DomText;
+  /** 走了哪条路由 */
+  route: VectorGatewayRoute;
+  /** 压缩前 domText 行数 */
+  originalLines: number;
+  /** 压缩后行数 */
+  filteredLines: number;
+  /** 压缩比描述，如 "98%" */
+  compressionRatio: string;
+  /** Plan B 语义降级时的匹配结果（Plan A 时为空） */
+  semanticMatches?: Array<{
+    index: number;
+    score: number;
+    matchedStep: number;
+  }>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // Abstractor 层类型定义
 // ═══════════════════════════════════════════════════════════════════════
 
-/** 伪代码行 */
+/** 伪代码行（v2.0 索引格式） */
 export interface PseudoCodeLine {
   lineNumber: number;
+  /** 伪代码，如 "click([3])" 或 "fill([2], '手机')" */
   code: string;
+  /** 对应的 FlowStep 索引 */
   sourceStep: number;
-  matchedElement: string | null;
+  /** 匹配到的 elementMap 索引（从 code 中提取） */
+  matchedElementIndex: number | null;
   confidence: number;
 }
 
@@ -394,7 +353,6 @@ export interface AbstractorResult {
   pseudoCode: PseudoCodeLine[];
   generationMethod: 'template' | 'llm';
   warnings: AbstractorWarning[];
-  /** 旧字段兼容 */
   code: string[];
   summary: string;
   thinking?: string;
@@ -406,7 +364,7 @@ export interface AbstractorResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Runner 层类型定义
+// Runner 层类型定义（v2.0 事件驱动重入）
 // ═══════════════════════════════════════════════════════════════════════
 
 /** Runner 每步执行结果 */
@@ -415,7 +373,10 @@ export interface StepResult {
   code: string;
   status: 'success' | 'failed' | 'skipped' | 'warning';
   action: ActionType;
+  /** 真实 CSS 选择器（从 elementMap 索引解析） */
   selector: string | null;
+  /** elementMap 索引（从伪代码解析） */
+  elementIndex: number | null;
   value: string | null;
   elapsedMs: number;
   screenshot: string | null;
@@ -445,39 +406,30 @@ export interface RunnerError {
   screenshot: string | null;
 }
 
-/** 旧版 ActionResultType（兼容保留） */
-export type ActionResultType =
-  | 'click'
-  | 'fill'
-  | 'select'
-  | 'check'
-  | 'navigate'
-  | 'screenshot'
-  | 'extract'
-  | 'wait'
-  | 'scroll';
+/** 页面突变类型 */
+export type MutationResultType = 'URL_CHANGE' | 'DOM_MUTATION' | 'NONE';
 
-/** 旧版 ActionResult（兼容保留） */
-export interface ActionResult {
-  step: number;
-  success: boolean;
-  data?: {
-    type?: ActionResultType;
-    code?: string;
-    pseudoCode?: string;
-    script?: string;
-    category?: StepCategory;
-    target?: {
-      uid: string;
-      selector: string;
-      tag: string;
-      role: SemanticRole;
-    };
-    extracted?: string | string[];
-    [key: string]: unknown;
-  };
-  error?: string;
-  screenshot?: string;
+/** 页面突变检测结果 */
+export interface MutationResult {
+  type: MutationResultType;
+  /** URL_CHANGE 时的目标 URL */
+  newUrl?: string;
+  /** DOM_MUTATION 时的描述 */
+  description?: string;
+}
+
+/** 状态变更记录（重入历史） */
+export interface StateChangeRecord {
+  /** 触发重入的步骤索引 */
+  triggeredByStepIndex: number;
+  /** 突变类型 */
+  mutationType: MutationResultType;
+  /** 突变描述 */
+  reason: string;
+  /** 跳转目标 URL（URL_CHANGE 时） */
+  targetUrl?: string;
+  /** 重入时剩余的 FlowStep 数量 */
+  remainingStepsCount: number;
 }
 
 /** Runner 输出 */
@@ -488,10 +440,15 @@ export interface RunnerResult {
   finalScreenshot: string | null;
   error: RunnerError | null;
   totalElapsedMs: number;
-  /** 旧字段兼容 */
-  results: ActionResult[];
+  results: StepResult[];
   duration?: number;
   extractedContents?: Array<{ selector: string; content: string | string[] }>;
+  /** v2.0: 重入历史记录 */
+  stateChanges: StateChangeRecord[];
+  /** v2.0: 总执行轮数（含重入） */
+  totalRounds: number;
+  /** 已执行的伪代码行数 */
+  executedLines: number;
 }
 
 export interface RunnerOptions {
@@ -502,7 +459,7 @@ export interface RunnerOptions {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// SSE 事件类型定义
+// SSE 事件类型定义（v2.0 扩展）
 // ═══════════════════════════════════════════════════════════════════════
 
 export const SSE_EVENT_TYPES = [
@@ -518,13 +475,14 @@ export const SSE_EVENT_TYPES = [
   'scanner.start',
   'scanner.scanning',
   'scanner.done',
-  // Vector
+  // Vector（v2.0 智能网关）
   'vector.start',
-  'vector.filtering',
-  'vector.computing',
+  'vector.gateway',
   'vector.done',
   // Abstractor
   'abstractor.start',
+  'abstractor.thinking',
+  'abstractor.error',
   'abstractor.done',
   // Runner
   'runner.start',
@@ -533,6 +491,10 @@ export const SSE_EVENT_TYPES = [
   'runner.step-error',
   'runner.extract',
   'runner.done',
+  // 状态突变（v2.0 重入核心）
+  'state_change_detected',
+  // Pipeline（多轮）
+  'pipeline.round-start',
 ] as const;
 
 export type SSEEventType = (typeof SSE_EVENT_TYPES)[number];
@@ -545,19 +507,32 @@ export interface SSEEvent<T = unknown> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Pipeline 类型定义
+// Pipeline 类型定义（v2.0 精简）
 // ═══════════════════════════════════════════════════════════════════════
 
+/** 单轮 Pipeline 执行结果（v2.0：由 Runner 状态机内部管理，Pipeline 不再构建） */
+export interface PipelineRound {
+  /** 轮次编号（从 0 开始） */
+  roundIndex: number;
+  /** 本轮扫描的 URL */
+  scannedUrl: string;
+  /** 本轮处理的 flow step 索引范围 */
+  stepRange: { start: number; end: number };
+  /** 本轮是否发生了页面状态突变 */
+  stateChange: StateChangeRecord | null;
+}
+
+/** Pipeline 输出 (v2.0 精简) — Scanner/Vector/Abstractor 由 Runner 内部调用 */
 export interface PipelineResult {
   intention: IntentionResult;
-  scan: ScannerResult;
-  vector: VectorResult;
-  abstractor: AbstractorResult;
   runner: RunnerResult;
+  totalRounds: number;
 }
 
 export interface PipelineOptions {
   headless?: boolean;
   context?: Array<{ role: 'user' | 'assistant'; content: string }>;
   model?: string;
+  /** 最大执行轮次（默认 5），防止无限循环 */
+  maxRounds?: number;
 }

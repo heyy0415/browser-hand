@@ -111,7 +111,6 @@ select {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.8px;
-  padding: 0 8px;
   margin-bottom: 8px;
 }
 
@@ -628,7 +627,68 @@ select {
   color: #d63031;
 }
 
-/* Inline extraction under step */
+/* ═══════════════════════════════════════════════════════════════════════
+   Vector Gateway Section
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.bh-gateway {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 6px 12px;
+  background: #f8f9fc;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.bh-gateway-badge {
+  font-weight: 600;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+  letter-spacing: 0.2px;
+}
+
+.bh-gateway-badge--a {
+  background: #e6f9ed;
+  color: #1a9a3e;
+}
+
+.bh-gateway-badge--b {
+  background: #fff8e6;
+  color: #d48806;
+}
+
+.bh-gateway-desc {
+  color: #6e7191;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   State Change Hint (re-entry scan indicator)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.bh-state-change-hint {
+  margin-bottom: 8px;
+  padding: 4px 0;
+}
+
+.bh-state-change-item {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: #d48806;
+  line-height: 1.6;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Inline extraction under step
+   ═══════════════════════════════════════════════════════════════════════ */
 
 .bh-timeline-extract {
   margin-top: 8px;
@@ -638,17 +698,8 @@ select {
   overflow: hidden;
 }
 
-.bh-timeline-extract-label {
-  padding: 5px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #1a9a3e;
-  background: #e6f9ed;
-  letter-spacing: 0.3px;
-}
-
 .bh-timeline-extract-text {
-  padding: 8px 10px;
+  padding: 5px;
   font-size: 13.5px;
   color: #2d3748;
   line-height: 1.6;

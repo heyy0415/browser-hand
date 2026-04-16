@@ -5,7 +5,7 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { submitTask } from '../services/task-api';
-import type { Message, SessionItem, PipelineState, ExtractedContent, StepState } from '../types';
+import type { Message, SessionItem, PipelineState, ExtractedContent, StepState, RoundInfo, RunnerStepInfo, VectorGatewayInfo, StateChangeInfo } from '../types';
 
 const INITIAL_PIPELINE: PipelineState = {
   intention: 'pending',
@@ -32,6 +32,7 @@ function getLayerFromEvent(event: string): keyof PipelineState | null {
   if (event.startsWith('vector.')) return 'vector';
   if (event.startsWith('abstractor.')) return 'abstractor';
   if (event.startsWith('runner.')) return 'runner';
+  if (event === 'state_change_detected') return 'runner';
   return null;
 }
 
@@ -80,12 +81,46 @@ export function useTask() {
 
           const layer = getLayerFromEvent(event);
 
+          // ── 辅助：获取当前轮次 ──
+          const rounds = message.rounds ?? [];
+
+          // 确保当前轮次存在
+          const ensureCurrentRound = (): RoundInfo[] => {
+            if (rounds.length === 0) {
+              return [{ roundIndex: 0, pipeline: { ...INITIAL_PIPELINE }, runnerSteps: [] }];
+            }
+            return rounds;
+          };
+
+          // 更新当前轮次的 pipeline 状态
+          const updateCurrentRoundPipeline = (update: Partial<PipelineState>): RoundInfo[] => {
+            const rs = ensureCurrentRound();
+            return rs.map((r, i) =>
+              i === rs.length - 1
+                ? { ...r, pipeline: { ...r.pipeline, ...update } }
+                : r,
+            );
+          };
+
+          // 更新当前轮次的 runnerSteps
+          const updateCurrentRoundSteps = (
+            updater: (steps: RunnerStepInfo[]) => RunnerStepInfo[],
+          ): RoundInfo[] => {
+            const rs = ensureCurrentRound();
+            return rs.map((r, i) =>
+              i === rs.length - 1
+                ? { ...r, runnerSteps: updater(r.runnerSteps) }
+                : r,
+            );
+          };
+
           // ── Intention 层 ──
           if (event === 'intention.start') {
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, intention: 'running' as StepState },
               thinking: { content: '', completed: false },
+              rounds: ensureCurrentRound(),
             };
           }
 
@@ -126,16 +161,38 @@ export function useTask() {
             };
           }
 
+          // ── Pipeline 轮次开始 ──
+          if (event === 'pipeline.round-start') {
+            const d = data as { roundIndex: number; totalRounds: number; completedSteps: number; totalSteps: number };
+            const newRounds = [...ensureCurrentRound()];
+
+            // 如果是新一轮（不是首轮），创建新的 round
+            if (d.roundIndex > 0) {
+              newRounds.push({
+                roundIndex: d.roundIndex,
+                pipeline: { ...INITIAL_PIPELINE },
+                runnerSteps: [],
+              });
+            }
+
+            return {
+              ...message,
+              rounds: newRounds,
+              // 重置顶层 pipeline 到新轮次初始状态
+              pipeline: { ...INITIAL_PIPELINE, intention: 'done' as StepState },
+            };
+          }
+
           // ── Scanner 层 ──
           if (event === 'scanner.start') {
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, scanner: 'running' as StepState },
+              rounds: updateCurrentRoundPipeline({ scanner: 'running' as StepState }),
             };
           }
 
           if (event === 'scanner.scanning') {
-            // 可选：展示扫描进度，暂不修改 message
             return message;
           }
 
@@ -143,6 +200,7 @@ export function useTask() {
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, scanner: 'done' as StepState },
+              rounds: updateCurrentRoundPipeline({ scanner: 'done' as StepState }),
             };
           }
 
@@ -151,18 +209,39 @@ export function useTask() {
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, vector: 'running' as StepState },
+              rounds: updateCurrentRoundPipeline({ vector: 'running' as StepState }),
             };
           }
 
           if (event === 'vector.filtering' || event === 'vector.computing') {
-            // 中间进度事件，暂不修改 message
             return message;
+          }
+
+          if (event === 'vector.gateway') {
+            const d = data as { route: string; originalLines: number; filteredLines: number; compressionRatio: string };
+            const gatewayInfo: VectorGatewayInfo = {
+              route: d.route as VectorGatewayInfo['route'],
+              originalLines: d.originalLines,
+              filteredLines: d.filteredLines,
+              compressionRatio: d.compressionRatio,
+            };
+            // 更新当前轮次的 vectorGateway
+            const rs = ensureCurrentRound();
+            const updatedRounds = rs.map((r, i) =>
+              i === rs.length - 1 ? { ...r, vectorGateway: gatewayInfo } : r,
+            );
+            return {
+              ...message,
+              vectorGateway: gatewayInfo,
+              rounds: updatedRounds,
+            };
           }
 
           if (event === 'vector.done') {
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, vector: 'done' as StepState },
+              rounds: updateCurrentRoundPipeline({ vector: 'done' as StepState }),
             };
           }
 
@@ -171,6 +250,7 @@ export function useTask() {
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, abstractor: 'running' as StepState },
+              rounds: updateCurrentRoundPipeline({ abstractor: 'running' as StepState }),
             };
           }
 
@@ -178,55 +258,87 @@ export function useTask() {
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, abstractor: 'done' as StepState },
+              rounds: updateCurrentRoundPipeline({ abstractor: 'done' as StepState }),
+            };
+          }
+
+          // ── 状态突变（v2.0 重入核心） ──
+          if (event === 'state_change_detected') {
+            const d = data as { type: string; reason: string; targetUrl?: string };
+            const changeInfo: StateChangeInfo = {
+              reason: d.reason,
+              target: d.targetUrl,
+            };
+            // 追加到 message.stateChanges 和当前 round
+            const existingChanges = message.stateChanges ?? [];
+            const rs = ensureCurrentRound();
+            const updatedRounds = rs.map((r, i) => {
+              if (i !== rs.length - 1) return r;
+              const roundChanges = r.stateChanges ?? [];
+              return { ...r, stateChanges: [...roundChanges, changeInfo] };
+            });
+            return {
+              ...message,
+              stateChanges: [...existingChanges, changeInfo],
+              rounds: updatedRounds,
             };
           }
 
           // ── Runner 层 ──
           if (event === 'runner.start') {
+            // 不再清空 runnerSteps，而是追加到当前轮次
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, runner: 'running' as StepState },
+              rounds: updateCurrentRoundPipeline({ runner: 'running' as StepState }),
+              // 兼容：顶层 runnerSteps 指向当前轮次（用于旧的渲染逻辑）
               runnerSteps: [],
             };
           }
 
           if (event === 'runner.step-start') {
             const d = data as { lineNumber: number; code: string; action: string };
-            const newSteps = [...(message.runnerSteps || []), {
+            const newStep: RunnerStepInfo = {
               lineNumber: d.lineNumber,
               code: d.code,
               action: d.action,
               status: 'running' as const,
-            }];
+            };
+            const newTopSteps = [...(message.runnerSteps || []), newStep];
             return {
               ...message,
-              runnerSteps: newSteps,
+              runnerSteps: newTopSteps,
+              rounds: updateCurrentRoundSteps((steps) => [...steps, newStep]),
             };
           }
 
           if (event === 'runner.step-done') {
             const d = data as { lineNumber: number; code: string; status: string; elapsedMs: number; screenshot?: string };
-            const newSteps = (message.runnerSteps || []).map((step) =>
-              step.lineNumber === d.lineNumber
-                ? { ...step, status: 'success' as const, elapsedMs: d.elapsedMs, screenshot: d.screenshot, extractedScreenshot: d.screenshot }
-                : step,
-            );
+            const updateStep = (steps: RunnerStepInfo[]) =>
+              steps.map((step) =>
+                step.lineNumber === d.lineNumber
+                  ? { ...step, status: 'success' as const, elapsedMs: d.elapsedMs, screenshot: d.screenshot, extractedScreenshot: d.screenshot }
+                  : step,
+              );
             return {
               ...message,
-              runnerSteps: newSteps,
+              runnerSteps: updateStep(message.runnerSteps || []),
+              rounds: updateCurrentRoundSteps(updateStep),
             };
           }
 
           if (event === 'runner.step-error') {
             const d = data as { lineNumber: number; code: string; error: { type: string; message: string }; retrying: boolean; retryAttempt: number };
-            const newSteps = (message.runnerSteps || []).map((step) =>
-              step.lineNumber === d.lineNumber
-                ? { ...step, status: 'failed' as const, error: d.error.message }
-                : step,
-            );
+            const updateStep = (steps: RunnerStepInfo[]) =>
+              steps.map((step) =>
+                step.lineNumber === d.lineNumber
+                  ? { ...step, status: 'failed' as const, error: d.error.message }
+                  : step,
+              );
             return {
               ...message,
-              runnerSteps: newSteps,
+              runnerSteps: updateStep(message.runnerSteps || []),
+              rounds: updateCurrentRoundSteps(updateStep),
             };
           }
 
@@ -243,26 +355,48 @@ export function useTask() {
               textResults: [...currentContent.textResults, { selector: d.selector, text: d.text, lineNumber: d.lineNumber }],
             };
 
-            // 同时将提取内容绑定到对应 runner step 上，以便内联展示
-            const newSteps = (message.runnerSteps || []).map((step) =>
-              step.lineNumber === d.lineNumber
-                ? { ...step, extractedText: d.text }
-                : step,
-            );
+            const updateStepExtract = (steps: RunnerStepInfo[]) =>
+              steps.map((step) =>
+                step.lineNumber === d.lineNumber
+                  ? { ...step, extractedText: d.text }
+                  : step,
+              );
+
+            // 更新当前轮次的 extractedContent
+            const rs = ensureCurrentRound();
+            const updatedRounds = rs.map((r, i) => {
+              if (i !== rs.length - 1) return r;
+              const roundContent = r.extractedContent || {
+                type: 'text' as const,
+                textResults: [],
+                screenshotResults: [],
+              };
+              return {
+                ...r,
+                runnerSteps: updateStepExtract(r.runnerSteps),
+                extractedContent: {
+                  ...roundContent,
+                  type: roundContent.screenshotResults.length > 0 ? 'mixed' as const : 'text' as const,
+                  textResults: [...roundContent.textResults, { selector: d.selector, text: d.text, lineNumber: d.lineNumber }],
+                } as ExtractedContent,
+              };
+            });
 
             return {
               ...message,
               extractedContent: newContent,
-              runnerSteps: newSteps,
+              runnerSteps: updateStepExtract(message.runnerSteps || []),
+              rounds: updatedRounds,
             };
           }
 
           if (event === 'runner.done') {
-            const d = data as { success: boolean; steps: unknown[]; extractedContent?: ExtractedContent; totalElapsedMs?: number };
+            const d = data as { success: boolean; steps: unknown[]; extractedContent?: ExtractedContent; totalElapsedMs?: number; navigationDetected?: boolean; navigatedToUrl?: string };
             return {
               ...message,
               pipeline: { ...message.pipeline ?? { ...INITIAL_PIPELINE }, runner: (d.success ? 'done' : 'error') as StepState },
               extractedContent: d.extractedContent || message.extractedContent,
+              rounds: updateCurrentRoundPipeline({ runner: (d.success ? 'done' : 'error') as StepState }),
             };
           }
 
@@ -287,6 +421,9 @@ export function useTask() {
               errorMessage: errorMsg,
               completed: true,
               pipeline: newPipeline,
+              rounds: layer
+                ? updateCurrentRoundPipeline({ [layer]: 'error' as StepState })
+                : rounds,
             };
           }
 

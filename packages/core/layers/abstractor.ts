@@ -1,11 +1,18 @@
-/** Layer 4: Abstractor — 将意图和筛选后的元素抽象为可执行伪代码 */
+/** Layer 4: Abstractor — 将意图和精简 domText 抽象为可执行伪代码（v2.0 索引格式） */
 
 import {
   ABSTRACTOR_SYSTEM_PROMPT,
   ABSTRACTOR_USER_PROMPT,
 } from '../constants';
 import { logger, streamLLM } from '../llm';
-import type { VectorResult, AbstractorResult, IntentionResult, PseudoCodeLine, AbstractorWarning } from '../types';
+import type {
+  DomText,
+  ElementMap,
+  FlowStep,
+  AbstractorResult,
+  AbstractorWarning,
+  PseudoCodeLine,
+} from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('abstractor', msg, meta);
 
@@ -15,6 +22,16 @@ export interface AbstractCallbacks {
   onError?: (error: string) => void;
   model?: string;
 }
+
+/** 多轮 Pipeline 时的额外选项 */
+export interface AbstractOptions {
+  /** 是否为多轮执行中的后续轮次 */
+  isSubsequentRound?: boolean;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 辅助函数
+// ═══════════════════════════════════════════════════════════════
 
 function extractThinking(content: string): string {
   const start = content.indexOf('<thinking>');
@@ -34,6 +51,10 @@ function extractThinking(content: string): string {
   return afterStart.slice(0, end);
 }
 
+/**
+ * 从 LLM 输出中提取伪代码行
+ * v2.0 适配 [index] 格式：click([3]), fill([2], 'value')
+ */
 function extractPseudoCode(content: string): string[] {
   const endTag = '</thinking>';
   const endIndex = content.indexOf(endTag);
@@ -45,177 +66,201 @@ function extractPseudoCode(content: string): string[] {
     .filter((line) => /^[a-zA-Z][a-zA-Z0-9]*\(/.test(line));
 }
 
-function buildPseudoCodeLines(code: string[], intention: IntentionResult, vector: VectorResult): PseudoCodeLine[] {
-  return code.map((codeLine, index) => {
-    // 尝试从伪代码中提取 selector
-    const selectorMatch = codeLine.match(/'([^']+)'/);
-    const selector = selectorMatch ? selectorMatch[1] : null;
+/** 解析 domText 单行，提取 index / tag / zone / pos / text */
+function parseDomTextLine(line: string): {
+  index: number;
+  tag: string;
+  zone: string;
+  pos: string;
+  text: string;
+  rawLine: string;
+} | null {
+  const match = line.match(/^\[(\d+)\]\s*<(\w+)([^>]*)>([\s\S]*?)<\/\w+>/);
+  if (!match) return null;
 
-    // 查找对应的 flow step
-    let sourceStep = index;
-    let matchedElement: string | null = selector;
-    let confidence = 1.0;
+  const index = parseInt(match[1], 10);
+  const tag = match[2];
+  const attrs = match[3];
+  const text = match[4].trim();
 
-    if (intention.flow) {
-      // 匹配到 flow step
-      const flowSteps = intention.flow.filter((s) => s.action !== 'navigate');
-      if (index < flowSteps.length) {
-        sourceStep = intention.flow.indexOf(flowSteps[index]);
+  const zoneMatch = attrs.match(/data-zone="([^"]+)"/);
+  const posMatch = attrs.match(/data-pos="([^"]+)"/);
 
-        // 查找向量匹配结果
-        const match = vector.matches.find((m) => m.matchedStep === sourceStep);
-        if (match) {
-          matchedElement = match.element.selector;
-          confidence = match.score;
-        }
+  return {
+    index,
+    tag,
+    zone: zoneMatch?.[1] || 'unknown',
+    pos: posMatch?.[1] || 'mid-center',
+    text,
+    rawLine: line,
+  };
+}
+
+/** 解析 filteredDomText 中所有可用元素 */
+function parseFilteredDomText(filteredDomText: DomText) {
+  return filteredDomText
+    .split('\n')
+    .map((line) => parseDomTextLine(line.trim()))
+    .filter((e): e is NonNullable<typeof e> => e !== null);
+}
+
+/**
+ * 构建伪代码行（v2.0 索引格式）
+ * 从 LLM 输出或模板 fallback 生成的 code 行中提取 [index]
+ */
+function buildPseudoCodeLines(code: string[], flowSteps: FlowStep[]): PseudoCodeLine[] {
+  // 伪代码方法名 → flow step action 类型的映射
+  const methodToAction: Record<string, string> = {
+    navigate: 'navigate', open: 'navigate',
+    fill: 'fill', select: 'select',
+    click: 'click', doubleClick: 'click',
+    check: 'check', uncheck: 'uncheck',
+    scrollDown: 'scroll', scrollUp: 'scroll', scrollToElement: 'scroll',
+    wait: 'wait', waitForElementVisible: 'wait',
+    getText: 'extract', extract: 'extract', extractWithRegex: 'extract', extractAll: 'extract',
+    screenshot: 'screenshot',
+  };
+
+  // 按顺序将伪代码行映射到 flow step 索引
+  const flowAssignment = new Map<number, number>(); // pseudocode index → flow step index
+  let nextFlowIdx = 0;
+
+  for (let pi = 0; pi < code.length; pi++) {
+    const line = code[pi];
+    const methodMatch = line.match(/^([a-zA-Z][a-zA-Z0-9]*)\(/);
+    if (!methodMatch || flowSteps.length === 0) continue;
+
+    const method = methodMatch[1];
+    const action = methodToAction[method] || method;
+
+    for (let fi = nextFlowIdx; fi < flowSteps.length; fi++) {
+      if (flowSteps[fi].action === action) {
+        flowAssignment.set(pi, fi);
+        nextFlowIdx = fi + 1;
+        break;
       }
     }
+  }
+
+  return code.map((codeLine, index) => {
+    // 从伪代码中提取 [index] 索引
+    const indexMatch = codeLine.match(/\[(\d+)\]/);
+    const matchedElementIndex = indexMatch ? parseInt(indexMatch[1], 10) : null;
+
+    const sourceStep = flowAssignment.get(index) ?? -1;
+    const confidence = 1.0;
 
     return {
       lineNumber: index + 1,
       code: codeLine,
       sourceStep,
-      matchedElement,
+      matchedElementIndex,
       confidence,
     };
   });
 }
 
-/** 构建 Top3 匹配结果传给 ABSTRACTOR_USER_PROMPT */
-function buildTopMatches(
-  intention: IntentionResult,
-  vector: VectorResult,
-): Array<{
-  stepIndex: number;
-  target: string;
-  matches: Array<{
-    rank: number;
-    selector: string;
-    score: number;
-    zone?: string;
-    rect?: { x: number; y: number; width: number; height: number };
-  }>;
-}> {
-  if (!intention.flow) return [];
-
-  // 按 matchedStep 分组
-  const stepMatches = new Map<number, Array<{ element: typeof vector.matches[number]['element']; score: number }>>();
-  for (const m of vector.matches) {
-    if (m.matchedStep === undefined) continue;
-    if (!stepMatches.has(m.matchedStep)) stepMatches.set(m.matchedStep, []);
-    stepMatches.get(m.matchedStep)!.push({ element: m.element, score: m.score });
-  }
-
-  const result: Array<{
-    stepIndex: number;
-    target: string;
-    matches: Array<{
-      rank: number;
-      selector: string;
-      score: number;
-      zone?: string;
-      rect?: { x: number; y: number; width: number; height: number };
-    }>;
-  }> = [];
-
-  for (let i = 0; i < intention.flow.length; i++) {
-    if (intention.flow[i].action === 'navigate') continue;
-    const matches = stepMatches.get(i) || [];
-    result.push({
-      stepIndex: i,
-      target: intention.flow[i].target,
-      matches: matches.slice(0, 3).map((m, j) => ({
-        rank: j + 1,
-        selector: m.element.selector,
-        score: m.score,
-        zone: m.element.semantics?.zone,
-        rect: m.element.rect,
-      })),
-    });
-  }
-
-  return result;
-}
-
-function buildWarnings(_code: string[], intention: IntentionResult, vector: VectorResult): AbstractorWarning[] {
-  const warnings: AbstractorWarning[] = [];
-
-  if (!intention.flow) return warnings;
-
-  for (let stepIndex = 0; stepIndex < intention.flow.length; stepIndex++) {
-    const step = intention.flow[stepIndex];
-    if (step.action === 'navigate') continue;
-
-    const match = vector.matches.find((m) => m.matchedStep === stepIndex);
-    if (!match) {
-      warnings.push({
-        type: 'no-match',
-        stepIndex,
-        message: `未找到匹配元素 — flow.target="${step.target}"`,
-        suggestion: '等待页面加载后重新扫描',
-      });
-    } else if (match.score < 0.5) {
-      warnings.push({
-        type: 'low-confidence',
-        stepIndex,
-        message: `${step.target} 匹配置信度较低 (${(match.score * 100).toFixed(1)}%)`,
-        suggestion: '等待页面加载后重新扫描',
-      });
-    }
-  }
-
-  return warnings;
-}
-
-function fallbackAbstract(intention: IntentionResult, vector: VectorResult): AbstractorResult {
+/**
+ * 模板 fallback：当 LLM 不可用或输出不足时，用简单匹配规则生成伪代码
+ * v2.0 使用 elementMap 索引格式
+ */
+function fallbackAbstract(
+  flowSteps: FlowStep[],
+  filteredDomText: DomText,
+  elementMap: ElementMap,
+): AbstractorResult {
   const code: string[] = [];
+  const availableElements = parseFilteredDomText(filteredDomText);
 
-  for (const step of intention.flow ?? []) {
-    const stepIndex = intention.flow!.indexOf(step);
-    const match = vector.matches.find((m) => m.matchedStep === stepIndex);
+  for (let stepIndex = 0; stepIndex < flowSteps.length; stepIndex++) {
+    const step = flowSteps[stepIndex];
 
     if (step.action === 'navigate') {
-      code.push(`open('${step.target}')`);
-    } else if (match) {
-      const selector = match.element.selector;
+      code.push(`navigate('${step.target}')`);
+      continue;
+    }
+
+    // 尝试通过 elementMap 匹配：zone → role → keyword
+    let matchedIndex: number | null = null;
+
+    // 按优先级匹配 elementMap 条目
+    for (const entry of availableElements) {
+      const mapEntry = elementMap[entry.index];
+      if (!mapEntry) continue;
+
+      let score = 0;
+
+      // zone 匹配
+      if (step.elementHint.zoneHint?.length && step.elementHint.zoneHint.includes(mapEntry.zone as never)) {
+        score += 2;
+      }
+
+      // role 匹配
+      if (step.elementHint.roleHint?.length && step.elementHint.roleHint.some(r => mapEntry.role.includes(r))) {
+        score += 2;
+      }
+
+      // keyword 匹配
+      if (step.elementHint.keywords?.length && step.elementHint.keywords.some(kw => mapEntry.rawText.includes(kw))) {
+        score += 2;
+      }
+
+      // interactionHint 匹配
+      if (step.elementHint.interactionHint) {
+        const hint = step.elementHint.interactionHint;
+        if (
+          (hint === 'input' && (mapEntry.role.includes('input') || mapEntry.role.includes('searchbox') || mapEntry.role.includes('textarea'))) ||
+          (hint === 'submit' && (mapEntry.role.includes('button'))) ||
+          (hint === 'navigation' && (mapEntry.role.includes('link') || mapEntry.role.includes('button'))) ||
+          (hint === 'selection' && (mapEntry.role.includes('select') || mapEntry.role.includes('combobox'))) ||
+          (hint === 'toggle' && (mapEntry.role.includes('checkbox') || mapEntry.role.includes('radio')))
+        ) {
+          score += 1;
+        }
+      }
+
+      // 需要至少 2 分才算匹配
+      if (score >= 2) {
+        matchedIndex = entry.index;
+        break;
+      }
+    }
+
+    if (matchedIndex !== null) {
       switch (step.action) {
         case 'click':
-          code.push(`click('${selector}')`);
+          code.push(`click([${matchedIndex}])`);
           break;
         case 'fill':
-          code.push(`fill('${selector}', '${step.value || ''}')`);
+          code.push(`fill([${matchedIndex}], '${step.value || ''}')`);
           break;
         case 'select':
-          code.push(`select('${selector}', '${step.value || ''}')`);
+          code.push(`select([${matchedIndex}], '${step.value || ''}')`);
           break;
         case 'check':
-          code.push(`check('${selector}')`);
+          code.push(`check([${matchedIndex}])`);
           break;
         case 'uncheck':
-          code.push(`uncheck('${selector}')`);
+          code.push(`uncheck([${matchedIndex}])`);
           break;
         case 'extract':
-          code.push(`getText('${selector}')`);
-          break;
-        case 'scroll':
-          code.push('scrollDown()');
+          code.push(`getText([${matchedIndex}])`);
           break;
         default:
-          code.push(`click('${selector}')`);
+          code.push(`click([${matchedIndex}])`);
       }
     } else if (step.action === 'scroll') {
       code.push('scrollDown()');
     } else if (step.action === 'wait') {
       code.push('wait(2000)');
     } else {
-      // 无匹配元素时，输出 WARNING + wait 而非静默跳过
       code.push(`# WARNING: 未找到匹配元素 — flow.target="${step.target}"`);
       code.push('wait(2000)');
     }
   }
 
-  const pseudoCode = buildPseudoCodeLines(code, intention, vector);
-  const warnings = buildWarnings(code, intention, vector);
+  const pseudoCode = buildPseudoCodeLines(code, flowSteps);
+  const warnings = buildWarnings(code, flowSteps, elementMap);
   const complexity = code.length <= 2 ? 'low' : code.length <= 5 ? 'medium' : 'high';
 
   return {
@@ -231,11 +276,74 @@ function fallbackAbstract(intention: IntentionResult, vector: VectorResult): Abs
   };
 }
 
+/** 构建警告列表 */
+function buildWarnings(
+  code: string[],
+  flowSteps: FlowStep[],
+  _elementMap: ElementMap,
+): AbstractorWarning[] {
+  const warnings: AbstractorWarning[] = [];
+
+  for (let stepIndex = 0; stepIndex < flowSteps.length; stepIndex++) {
+    const step = flowSteps[stepIndex];
+    if (step.action === 'navigate') continue;
+
+    // 检查代码中是否存在该 step 对应的索引
+    const methodToAction: Record<string, string> = {
+      navigate: 'navigate', open: 'navigate',
+      fill: 'fill', select: 'select',
+      click: 'click', doubleClick: 'click',
+      check: 'check', uncheck: 'uncheck',
+      scrollDown: 'scroll', scrollUp: 'scroll',
+      wait: 'wait', waitForElementVisible: 'wait',
+      getText: 'extract', extract: 'extract', extractWithRegex: 'extract', extractAll: 'extract',
+      screenshot: 'screenshot',
+    };
+
+    // 找到该 step 对应的伪代码行
+    const hasMatchingCode = code.some((line) => {
+      const methodMatch = line.match(/^([a-zA-Z][a-zA-Z0-9]*)\(/);
+      if (!methodMatch) return false;
+      const action = methodToAction[methodMatch[1]] || methodMatch[1];
+      return action === step.action;
+    });
+
+    if (!hasMatchingCode) {
+      warnings.push({
+        type: 'no-match',
+        stepIndex,
+        message: `未找到匹配元素 — flow.target="${step.target}"`,
+        suggestion: '等待页面加载后重新扫描',
+      });
+    }
+  }
+
+  return warnings;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 主函数
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Abstractor 主入口（v2.0）
+ * @param flowSteps Intention 层输出的操作步骤
+ * @param filteredDomText Vector Gateway 过滤后的精简 domText
+ * @param elementMap 完整元素映射表（用于 fallback 匹配）
+ * @param pageUrl 当前页面 URL（用于跨页面检测）
+ * @param callbacks 流式回调
+ * @param options 额外选项
+ */
 export async function abstract(
-  intention: IntentionResult,
-  vector: VectorResult,
+  flowSteps: FlowStep[],
+  filteredDomText: DomText,
+  elementMap: ElementMap,
+  pageUrl: string,
   callbacks: AbstractCallbacks = {},
+  options: AbstractOptions = {},
 ): Promise<AbstractorResult> {
+  const { isSubsequentRound } = options;
+
   try {
     let accumulated = '';
     let sentThinkingLength = 0;
@@ -245,16 +353,10 @@ export async function abstract(
       {
         role: 'user',
         content: ABSTRACTOR_USER_PROMPT({
-          flow: intention,
-          snapshot: {
-            title: vector.title,
-            url: vector.url,
-            elements: vector.elements,
-            visibleText: vector.visibleText,
-            capabilities: vector.capabilities,
-            groupedElements: vector.groupedElements,
-          },
-          topMatches: buildTopMatches(intention, vector),
+          flow: flowSteps,
+          filteredDomText,
+          pageUrl,
+          isSubsequentRound,
         }),
       },
     ], { model: callbacks.model })) {
@@ -275,12 +377,37 @@ export async function abstract(
       throw new Error('LLM 响应中未找到可执行伪代码');
     }
 
-    // 校验：非 navigate 步骤数应与 intention.flow 中非 navigate 步骤数一致
-    const expectedNonNavSteps = (intention.flow ?? []).filter((s) => s.action !== 'navigate').length;
+    // 校验：非 navigate 步骤数应与 flowSteps 中非 navigate 步骤数一致
+    const expectedNonNavSteps = flowSteps.filter((s) => s.action !== 'navigate').length;
     const actualNonNavSteps = code.filter((line) => {
       const m = line.match(/^([a-zA-Z][a-zA-Z0-9]*)\(/);
       return m && m[1] !== 'navigate' && m[1] !== 'open';
     }).length;
+
+    // 校验：flow 中的 extract 步骤必须有对应的 getText/extract 伪代码
+    const extractFlowSteps = flowSteps
+      .map((s, i) => ({ action: s.action, index: i }))
+      .filter((s) => s.action === 'extract');
+    const hasGetTextInCode = code.some((line) => {
+      const m = line.match(/^([a-zA-Z][a-zA-Z0-9]*)\(/);
+      return m && (m[1] === 'getText' || m[1] === 'extract' || m[1] === 'extractWithRegex' || m[1] === 'extractAll');
+    });
+
+    let codeWithExtract = [...code];
+    if (extractFlowSteps.length > 0 && !hasGetTextInCode) {
+      // LLM 漏掉了 extract 步骤，手动补充
+      // 尝试从 domText 中找一个 main-content 区域的元素索引
+      const availableElements = parseFilteredDomText(filteredDomText);
+      const mainContentEl = availableElements.find((e) => e.zone === 'main-content');
+      const fallbackIdx = mainContentEl?.index ?? 0;
+      for (const _flowStep of extractFlowSteps) {
+        codeWithExtract.push(`getText([${fallbackIdx}])`);
+      }
+      log('supplemented missing extract steps', {
+        extractSteps: extractFlowSteps.length,
+        fallbackIndex: fallbackIdx,
+      });
+    }
 
     if (actualNonNavSteps < expectedNonNavSteps) {
       log('llm generated fewer steps than expected, supplementing with fallback', {
@@ -289,8 +416,8 @@ export async function abstract(
       });
 
       // 用 fallback 补充缺失的步骤
-      const fallbackResult = fallbackAbstract(intention, vector);
-      const mergedCode = [...code];
+      const fallbackResult = fallbackAbstract(flowSteps, filteredDomText, elementMap);
+      const mergedCode = [...codeWithExtract];
 
       // 将 fallback 中 LLM 未覆盖的步骤追加到末尾
       for (const fbLine of fallbackResult.code) {
@@ -298,17 +425,18 @@ export async function abstract(
         const fbMethod = m ? m[1] : '';
         // 跳过 navigate/open（由 runner 或已有逻辑处理）
         if (fbMethod === 'navigate' || fbMethod === 'open') continue;
-        // 如果 LLM 已生成该 selector 的操作，跳过
-        const fbSelector = fbLine.match(/'([^']+)'/)?.[1];
-        if (fbSelector) {
-          const alreadyCovered = mergedCode.some((existing) => existing.includes(`'${fbSelector}'`));
+        // 如果 LLM 已生成该索引的操作，跳过
+        const fbIndexMatch = fbLine.match(/\[(\d+)\]/);
+        if (fbIndexMatch) {
+          const fbIdx = fbIndexMatch[1];
+          const alreadyCovered = mergedCode.some((existing) => existing.includes(`[${fbIdx}]`));
           if (alreadyCovered) continue;
         }
         mergedCode.push(fbLine);
       }
 
-      const pseudoCode = buildPseudoCodeLines(mergedCode, intention, vector);
-      const warnings = buildWarnings(mergedCode, intention, vector);
+      const pseudoCode = buildPseudoCodeLines(mergedCode, flowSteps);
+      const warnings = buildWarnings(mergedCode, flowSteps, elementMap);
       const complexity = mergedCode.length <= 2 ? 'low' : mergedCode.length <= 5 ? 'medium' : 'high';
 
       log('done', { steps: mergedCode.length, method: 'llm+fallback' });
@@ -327,21 +455,21 @@ export async function abstract(
       };
     }
 
-    const pseudoCode = buildPseudoCodeLines(code, intention, vector);
-    const warnings = buildWarnings(code, intention, vector);
-    const complexity = code.length <= 2 ? 'low' : code.length <= 5 ? 'medium' : 'high';
+    const pseudoCode = buildPseudoCodeLines(codeWithExtract, flowSteps);
+    const warnings = buildWarnings(codeWithExtract, flowSteps, elementMap);
+    const complexity = codeWithExtract.length <= 2 ? 'low' : codeWithExtract.length <= 5 ? 'medium' : 'high';
 
-    log('done', { steps: code.length, method: 'llm' });
+    log('done', { steps: codeWithExtract.length, method: 'llm' });
 
     return {
       pseudoCode,
       generationMethod: 'llm',
       warnings,
-      code,
-      summary: code.join(' -> '),
+      code: codeWithExtract,
+      summary: codeWithExtract.join(' -> '),
       thinking,
       meta: {
-        totalSteps: code.length,
+        totalSteps: codeWithExtract.length,
         estimatedComplexity: complexity,
       },
     };
@@ -349,6 +477,6 @@ export async function abstract(
     const message = error instanceof Error ? error.message : String(error);
     callbacks.onError?.(message);
     log('fallback', message);
-    return fallbackAbstract(intention, vector);
+    return fallbackAbstract(flowSteps, filteredDomText, elementMap);
   }
 }

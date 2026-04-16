@@ -1,29 +1,34 @@
-/** Layer 5: Runner — 执行伪代码并返回结果（智能等待与自愈） */
+/** Layer 5: Runner — 事件驱动重入状态机（v2.0 索引格式 + 突变检测） */
 
-import type { Page } from 'playwright';
+import type { Page, BrowserContext } from 'playwright';
 import { logger } from '../llm';
-import { getOrCreateBrowser } from '../browser-registry';
+import { scanPageFromPlaywrightPage } from './scanner';
+import { vectorGateway, type VectorCallbacks } from './vector';
+import { abstract, type AbstractCallbacks } from './abstractor';
 import type {
-  AbstractorResult,
-  VectorResult,
+  FlowStep,
+  ElementMap,
   RunnerResult,
   RunnerOptions,
-  ActionResult,
-  ActionResultType,
-  IntentionResult,
   StepResult,
   ExtractedContent,
   TextResult,
   RunnerError,
+  MutationResult,
+  StateChangeRecord,
+  ActionType,
+  ScannerResult,
+  VectorGatewayResult,
+  AbstractorResult,
 } from '../types';
-import { getStepCategory, StepCategory } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('runner', msg, meta);
 
 const MAX_SELF_HEAL_RETRIES = 2;
+const MAX_REENTRY_ROUNDS = 5;
 
 // ═══════════════════════════════════════════════════════════════════════
-// 伪代码解析
+// 伪代码解析（v2.0 适配 [index] 格式）
 // ═══════════════════════════════════════════════════════════════════════
 
 type ParsedPseudo = { method: string; args: string[]; isComment: boolean };
@@ -40,50 +45,98 @@ function parsePseudo(line: string): ParsedPseudo {
   if (!m) return { method: 'comment', args: [trimmed], isComment: true };
 
   const method = m[1];
-  const args: string[] = [];
   const inner = m[2];
+  const args: string[] = [];
 
-  // 先尝试提取引号参数：'value' 或 "value"
-  const quotedRe = /'([^']*)'|"([^"]*)"/g;
-  let hasQuotedArgs = false;
-  for (const hit of inner.matchAll(quotedRe)) {
-    args.push(hit[1] ?? hit[2] ?? '');
-    hasQuotedArgs = true;
-  }
+  // 逐段解析参数：[index] / 'quoted' / 裸值
+  let remaining = inner;
+  while (remaining.length > 0) {
+    remaining = remaining.trim();
 
-  // 无引号参数时，按逗号分割提取裸值（如 wait(2000)、scrollDown()）
-  if (!hasQuotedArgs && inner.length > 0) {
-    for (const part of inner.split(',')) {
-      const val = part.trim();
-      if (val) args.push(val);
+    // [index] 格式
+    const indexMatch = remaining.match(/^\[(\d+)\]/);
+    if (indexMatch) {
+      args.push(indexMatch[0]);
+      remaining = remaining.slice(indexMatch[0].length).trim();
+      if (remaining.startsWith(',')) remaining = remaining.slice(1).trim();
+      continue;
     }
+
+    // 引号字符串
+    const quoteMatch = remaining.match(/^'([^']*)'|^"([^"]*)"/);
+    if (quoteMatch) {
+      args.push(quoteMatch[1] ?? quoteMatch[2] ?? '');
+      remaining = remaining.slice(quoteMatch[0].length).trim();
+      if (remaining.startsWith(',')) remaining = remaining.slice(1).trim();
+      continue;
+    }
+
+    // 裸值（数字、标识符等）
+    const bareMatch = remaining.match(/^([^,)]+)/);
+    if (bareMatch) {
+      args.push(bareMatch[1].trim());
+      remaining = remaining.slice(bareMatch[0].length).trim();
+      if (remaining.startsWith(',')) remaining = remaining.slice(1).trim();
+      continue;
+    }
+
+    break;
   }
 
   return { method, args, isComment: false };
 }
 
-function resolveActionType(method: string): ActionResultType {
-  const map: Record<string, ActionResultType> = {
+function resolveActionType(method: string): ActionType {
+  const map: Record<string, ActionType> = {
     navigate: 'navigate', fill: 'fill', select: 'select',
-    check: 'check', uncheck: 'check', scrollDown: 'scroll', scrollUp: 'scroll',
+    check: 'check', uncheck: 'uncheck', scrollDown: 'scroll', scrollUp: 'scroll',
     screenshot: 'screenshot', getText: 'extract', extract: 'extract',
     open: 'navigate', wait: 'wait',
     waitForElementVisible: 'wait', scrollToElement: 'scroll', extractWithRegex: 'extract',
+    extractAll: 'extract', doubleClick: 'click',
   };
   return map[method] || 'click';
 }
 
-function resolveStepCategory(method: string): StepCategory {
-  const actionType = resolveActionType(method);
-  switch (actionType) {
-    case 'navigate': return 'navigation';
-    case 'extract': return 'extraction';
-    case 'screenshot':
-    case 'scroll':
-    case 'wait':
-      return 'observation';
-    default: return 'interaction';
+/** 将 [index] 参数解析为真实 CSS selector */
+function resolveSelectorFromArgs(
+  args: string[],
+  elementMap: ElementMap,
+): {
+  selector: string | null;
+  elementIndex: number | null;
+  value: string | null;
+} {
+  const firstArg = args[0];
+  if (!firstArg) return { selector: null, elementIndex: null, value: null };
+
+  // [index] 格式
+  const indexMatch = firstArg.match(/^\[(\d+)\]$/);
+  if (indexMatch) {
+    const index = parseInt(indexMatch[1], 10);
+    const entry = elementMap[index];
+    return {
+      selector: entry?.selector ?? null,
+      elementIndex: index,
+      value: args[1] ?? null,
+    };
   }
+
+  // 直接值（如 navigate 的 URL）
+  return {
+    selector: firstArg,
+    elementIndex: null,
+    value: args[1] ?? null,
+  };
+}
+
+/** 将 Shadow DOM 穿透选择器 (>>> 语法) 转换为 Playwright 兼容格式 */
+function toPlaywrightSelector(selector: string): string {
+  if (!selector.includes(' >>> ')) return selector;
+  return selector
+    .split(' >>> ')
+    .map((segment) => `css=${segment}`)
+    .join(' >> ');
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -137,12 +190,7 @@ async function clickWithOverlayFallback(page: Page, selector: string): Promise<v
   }
 }
 
-/**
- * fill 操作的可见性降级：
- * 1. 先尝试原生 page.fill
- * 2. 如果元素不可见，尝试 scrollIntoViewIfNeeded 后重试
- * 3. 最终降级到 JS 直接设置 value + 触发 input 事件
- */
+/** fill 可见性降级：原生 fill → scrollIntoView + 重试 → JS 直接设值 */
 async function fillWithVisibilityFallback(page: Page, selector: string, value: string): Promise<void> {
   try {
     await page.fill(selector, value, { timeout: 5000 });
@@ -150,11 +198,9 @@ async function fillWithVisibilityFallback(page: Page, selector: string, value: s
   } catch (error) {
     const msg = error instanceof Error ? error.message : '';
     if (!msg.includes('not visible') && !msg.includes('not editable')) throw error;
-
     log('element not visible, attempting scrollIntoView', { selector });
   }
 
-  // 尝试滚动到可见区域后重试
   try {
     await page.locator(selector).scrollIntoViewIfNeeded({ timeout: 3000 });
     await page.waitForTimeout(300);
@@ -164,28 +210,23 @@ async function fillWithVisibilityFallback(page: Page, selector: string, value: s
     log('scrollIntoView failed, fallback to JS fill', { selector });
   }
 
-  // 最终降级：JS 直接设置 value 并触发 input/change 事件
   await page.evaluate(`
     (args) => {
       const [sel, val] = args;
       const el = document.querySelector(sel);
       if (!el) throw new Error('Element not found: ' + sel);
-
       el.removeAttribute('readonly');
       el.removeAttribute('disabled');
-
       const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
         window.HTMLInputElement.prototype, 'value'
       )?.set || Object.getOwnPropertyDescriptor(
         window.HTMLTextAreaElement.prototype, 'value'
       )?.set;
-
       if (nativeInputValueSetter) {
         nativeInputValueSetter.call(el, val);
       } else {
         el.value = val;
       }
-
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
@@ -219,7 +260,7 @@ async function extractMultipleContent(page: Page, selector: string): Promise<str
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 智能等待（替代硬等待）
+// 智能等待
 // ═══════════════════════════════════════════════════════════════════════
 
 async function smartWait(page: Page, ms?: number): Promise<void> {
@@ -240,142 +281,106 @@ function isDetachedError(msg: string): boolean {
 
 async function rescanForElement(page: Page, oldSelector: string): Promise<string | null> {
   try {
-    return await page.evaluate((sel) => {
-      const old = document.querySelector(sel);
-      if (old && old.isConnected) return sel;
+    return await page.evaluate(`
+      (sel) => {
+        const old = document.querySelector(sel);
+        if (old && old.isConnected) return sel;
 
-      // 从旧 selector 中提取特征寻找替代
-      const idMatch = sel.match(/^#([\w-]+)/);
-      if (idMatch) {
-        const byId = document.getElementById(idMatch[1]);
-        if (byId && byId.isConnected) return sel;
-      }
+        const idMatch = sel.match(/^#([\\w-]+)/);
+        if (idMatch) {
+          const byId = document.getElementById(idMatch[1]);
+          if (byId && byId.isConnected) return sel;
+        }
 
-      const tag = sel.match(/^(\w+)/)?.[1];
-      const text = sel.match(/has-text\("([^"]+)"\)/)?.[1];
-      if (tag && text) {
-        const candidates = document.querySelectorAll(tag);
-        for (const c of candidates) {
-          if (c.textContent?.includes(text) && c.isConnected) {
-            if (c.id) return '#' + CSS.escape(c.id);
-            return sel; // 无法生成更好 selector，返回原始
+        const tag = sel.match(/^(\\w+)/)?.[1];
+        const text = sel.match(/has-text\\("([^"]+)"\\)/)?.[1];
+        if (tag && text) {
+          const candidates = document.querySelectorAll(tag);
+          for (const c of candidates) {
+            if (c.textContent?.includes(text) && c.isConnected) {
+              if (c.id) return '#' + CSS.escape(c.id);
+              return sel;
+            }
           }
         }
-      }
 
-      // 尝试通过 name 属性匹配
-      const nameMatch = sel.match(/\[name="([^"]+)"\]/);
-      if (nameMatch) {
-        const byName = document.querySelector(`[name="${nameMatch[1]}"]`);
-        if (byName && byName.isConnected) return sel;
-      }
+        const nameMatch = sel.match(/\\[name="([^"]+)"\\]/);
+        if (nameMatch) {
+          const byName = document.querySelector('[name="' + nameMatch[1] + '"]');
+          if (byName && byName.isConnected) return sel;
+        }
 
-      return null;
-    }, oldSelector);
+        return null;
+      }
+    `, oldSelector);
   } catch {
     return null;
   }
 }
 
-/** 执行单步伪代码，带自愈重试 */
-async function executeStep(page: Page, method: string, args: string[]): Promise<void> {
-  switch (method) {
-    case 'navigate':
-    case 'open':
-      await page.goto(args[0], { waitUntil: 'domcontentloaded' });
-      break;
-    case 'click':
-    case 'doubleClick':
-      await clickWithOverlayFallback(page, args[0]);
-      break;
-    case 'fill':
-      await fillWithVisibilityFallback(page, args[0], args[1] ?? '');
-      break;
-    case 'select':
-      try {
-        await page.selectOption(args[0], { label: args[1] ?? '' }, { timeout: 5000 });
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : '';
-        if (msg.includes('not visible')) {
-          log('select element not visible, attempting scrollIntoView', { selector: args[0] });
-          try {
-            await page.locator(args[0]).scrollIntoViewIfNeeded({ timeout: 3000 });
-            await page.waitForTimeout(300);
-            await page.selectOption(args[0], { label: args[1] ?? '' }, { timeout: 5000 });
-          } catch {
-            log('select scrollIntoView failed, fallback to JS', { selector: args[0] });
-            await page.evaluate(`
-              (args) => {
-                const [sel, val] = args;
-                const el = document.querySelector(sel);
-                if (el && el.tagName === 'SELECT') {
-                  el.value = val;
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-              }
-            `, [args[0], args[1] ?? '']);
-          }
-        } else {
-          throw error;
-        }
+// ═══════════════════════════════════════════════════════════════════════
+// v2.0 突变检测
+// ═══════════════════════════════════════════════════════════════════════
+
+/** 在浏览器中注入 MutationObserver 监听 body childList 变化 */
+async function injectMutationObserver(page: Page): Promise<void> {
+  await page.evaluate(`
+    () => {
+      window.__mutationDetected = false;
+      if (window.__mutationObserver) {
+        window.__mutationObserver.disconnect();
       }
-      break;
-    case 'check':
-      await page.check(args[0]);
-      break;
-    case 'uncheck':
-      await page.uncheck(args[0]);
-      break;
-    case 'scrollDown':
-      await page.mouse.wheel(0, 800);
-      break;
-    case 'scrollUp':
-      await page.mouse.wheel(0, -800);
-      break;
-    case 'screenshot':
-      // screenshot 在外层处理 buffer
-      await page.screenshot({ fullPage: true });
-      break;
-    case 'waitForElementVisible':
-      await page.waitForSelector(args[0], { state: 'visible', timeout: 10000 });
-      break;
-    case 'scrollToElement':
-      await page.locator(args[0]).scrollIntoViewIfNeeded({ timeout: 5000 });
-      break;
-    case 'getText':
-    case 'extract':
-      // 在外层处理 extractedContent
-      await page.textContent(args[0]);
-      break;
-    case 'extractWithRegex': {
-      // 在外层处理
-      const rawText = await extractContent(page, args[0]);
-      const regex = new RegExp(args[1] || '(.+)');
-      rawText.match(regex); // 仅执行匹配，结果在外层收集
-      break;
+      const observer = new MutationObserver(() => {
+        window.__mutationDetected = true;
+        observer.disconnect();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      window.__mutationObserver = observer;
     }
-    case 'wait': {
-      const waitArg = args[0];
-      if (waitArg && /^\d+$/.test(waitArg)) {
-        // 数字参数：智能等待 networkidle，上限取 min(输入值, 5000)
-        await smartWait(page, parseInt(waitArg));
-      } else if (waitArg) {
-        // 非数字参数视为 selector：waitForSelector
-        await page.waitForSelector(waitArg, { state: 'visible', timeout: 10000 });
-      } else {
-        await smartWait(page, 2000);
+  `);
+}
+
+/**
+ * 点击元素并等待页面突变
+ * Promise.race 语义：URL 变化 / DOM Mutation / 超时无变化
+ */
+async function clickAndWaitForMutation(
+  page: Page,
+  selector: string,
+  timeout: number = 5000,
+): Promise<MutationResult> {
+  const urlBefore = page.url();
+  const pwSelector = toPlaywrightSelector(selector);
+
+  // 注入 MutationObserver
+  await injectMutationObserver(page);
+
+  // 执行点击
+  await clickWithOverlayFallback(page, pwSelector);
+
+  // 轮询检测突变
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeout) {
+    // 检查 URL 变化
+    try {
+      const currentUrl = page.url();
+      if (currentUrl !== urlBefore) {
+        return { type: 'URL_CHANGE', newUrl: currentUrl };
       }
-      break;
-    }
-    default: {
-      const selector = args[0];
-      if (!selector) {
-        log('unknown method without selector, skipping', { method });
-        break;
+    } catch { /* page 可能已分离 */ }
+
+    // 检查 DOM 突变
+    try {
+      const detected = await page.evaluate('window.__mutationDetected');
+      if (detected) {
+        return { type: 'DOM_MUTATION', description: '弹窗/动态内容加载' };
       }
-      await clickWithOverlayFallback(page, selector);
-    }
+    } catch { /* page 可能已分离 */ }
+
+    await page.waitForTimeout(200);
   }
+
+  return { type: 'NONE' };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -383,265 +388,382 @@ async function executeStep(page: Page, method: string, args: string[]): Promise<
 // ═══════════════════════════════════════════════════════════════════════
 
 export interface RunnerCallbacks {
-  onStep?: (index: number, total: number, codeLine: string, success: boolean, error?: string) => void;
-  onError?: (error: string) => void;
-  onExtraction?: (content: string | string[], selector: string) => void;
-
   onStepStart?: (data: { lineNumber: number; code: string; action: string }) => void;
   onStepDone?: (data: { lineNumber: number; code: string; status: 'success' | 'failed' | 'skipped' | 'warning'; elapsedMs: number; screenshot?: string }) => void;
   onStepError?: (data: { lineNumber: number; code: string; error: { type: string; message: string }; retrying: boolean; retryAttempt: number }) => void;
   onExtract?: (data: { lineNumber: number; selector: string; text: string }) => void;
+  onError?: (error: string) => void;
+  /** SSE 事件发送器 */
+  sendEvent?: (event: string, data: unknown) => void;
+  /** Scanner/Vector/Abstractor 层 SSE 事件回调 */
+  onScanStart?: () => void;
+  onScanDone?: (result: ScannerResult) => void;
+  onVectorStart?: () => void;
+  onVectorGateway?: (data: { route: string; originalLines: number; filteredLines: number; compressionRatio: string }) => void;
+  onVectorDone?: (result: VectorGatewayResult) => void;
+  onAbstractStart?: () => void;
+  onAbstractDelta?: (delta: string) => void;
+  onAbstractDone?: (result: AbstractorResult) => void;
 }
 
 export interface RunnerRunOptions extends RunnerOptions {
   sessionId?: string;
-  needsBrowser?: boolean;
+  /** 最大重入轮次（默认 5） */
+  maxRounds?: number;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 意图分析
+// v2.0 主入口：事件驱动重入状态机
 // ═══════════════════════════════════════════════════════════════════════
 
-function analyzeIntentionNeedsBrowser(intention: IntentionResult): boolean {
-  if (!intention.flow) return false;
-  return intention.flow.some((step) => {
-    const category = getStepCategory(step.action);
-    return category === 'interaction' || category === 'navigation';
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// 主执行函数
-// ═══════════════════════════════════════════════════════════════════════
-
-export async function run(
-  targetUrl: string,
-  abstractor: AbstractorResult,
-  vector: VectorResult,
-  options: RunnerRunOptions = {},
+/**
+ * 事件驱动重入状态机（v2.0 Runner 主入口）
+ *
+ * while (remainingFlow.length > 0 && round < maxRounds):
+ *   1. Scanner 扫描当前页面 → domText + elementMap
+ *   2. Vector Gateway 过滤 → filteredDomText
+ *   3. Abstractor 生成伪代码 → click([3]) / fill([2], 'val')
+ *   4. 逐步执行伪代码:
+ *      - click 步骤: clickAndWaitForMutation → 突变则 break for, 继续 while
+ *      - 其他步骤: 直接执行
+ *   5. 无突变 → break while (完成)
+ *   6. 突变 → 计算 remainingFlow, 继续 while
+ */
+export async function executeWithStateControl(
+  page: Page,
+  _context: BrowserContext,
+  initialFlow: FlowStep[],
   callbacks: RunnerCallbacks = {},
-  intention?: IntentionResult,
+  options: RunnerRunOptions = {},
 ): Promise<RunnerResult> {
+  const maxRounds = options.maxRounds ?? MAX_REENTRY_ROUNDS;
   const stepDelay = options.stepDelay ?? 500;
   const actionTimeout = options.actionTimeout ?? 10_000;
-  const needsBrowser = options.needsBrowser ?? (intention ? analyzeIntentionNeedsBrowser(intention) : true);
-  const headless = options.headless ?? true;
-  const sessionId = options.sessionId || 'default';
 
-  const results: ActionResult[] = [];
+  const stateChanges: StateChangeRecord[] = [];
   const stepResults: StepResult[] = [];
   const textResults: TextResult[] = [];
   const screenshotResults: string[] = [];
-  const start = Date.now();
-  let success = true;
   const extractedContents: Array<{ selector: string; content: string | string[] }> = [];
   let runnerError: RunnerError | null = null;
+  let success = true;
+  let totalRounds = 0;
+  let executedLines = 0;
+  const start = Date.now();
 
-  const codeLines = abstractor.code;
+  let remainingFlow = [...initialFlow];
 
-  log('start', { url: targetUrl, steps: codeLines.length, headless, sessionId, needsBrowser });
+  page.setDefaultTimeout(actionTimeout);
 
-  if (!needsBrowser) {
-    log('skip browser', { reason: 'no interaction needed' });
-    return {
-      success: true,
-      steps: [],
-      extractedContent: null,
-      finalScreenshot: null,
-      error: null,
-      totalElapsedMs: Date.now() - start,
-      results: [],
-      duration: Date.now() - start,
-      extractedContents,
-    };
-  }
+  log('state machine start', { initialSteps: initialFlow.length, maxRounds });
 
-  const { browser } = await getOrCreateBrowser(sessionId, headless);
+  while (remainingFlow.length > 0 && totalRounds < maxRounds) {
+    totalRounds++;
+    log('round start', { round: totalRounds, remainingSteps: remainingFlow.length });
+    callbacks.sendEvent?.('pipeline.round-start', { roundIndex: totalRounds - 1 });
 
-  try {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    page.setDefaultTimeout(actionTimeout);
-
-    // 判断伪代码中是否包含导航指令
-    const hasNavigateInCode = codeLines.some((line) => {
-      const { method, isComment } = parsePseudo(line);
-      return !isComment && (method === 'navigate' || method === 'open');
-    });
-
-    // 仅当伪代码中没有导航指令时，才用 targetUrl 初始化页面
-    // 否则由伪代码中的 navigate/open 指令驱动导航，避免双重跳转
-    if (!hasNavigateInCode) {
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+    // ── 1. Scanner ──
+    callbacks.onScanStart?.();
+    callbacks.sendEvent?.('scanner.start', {});
+    let scanResult: ScannerResult;
+    try {
+      scanResult = await scanPageFromPlaywrightPage(page);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      log('scan failed', { round: totalRounds, error: msg });
+      callbacks.onError?.(msg);
+      success = false;
+      runnerError = { type: 'execution-error', lineNumber: 0, code: '', message: `扫描失败: ${msg}`, screenshot: null };
+      break;
     }
+    callbacks.onScanDone?.(scanResult);
+    callbacks.sendEvent?.('scanner.done', {});
 
-    for (let i = 0; i < codeLines.length; i++) {
-      const codeLine = codeLines[i];
+    // ── 2. Vector Gateway ──
+    callbacks.onVectorStart?.();
+    callbacks.sendEvent?.('vector.start', {});
+    const vectorCb: VectorCallbacks = {
+      onGateway: (data) => {
+        callbacks.onVectorGateway?.(data);
+        callbacks.sendEvent?.('vector.gateway', data);
+      },
+    };
+    const vectorResult = await vectorGateway(
+      remainingFlow,
+      scanResult.domText,
+      scanResult.elementMap,
+      vectorCb,
+    );
+    callbacks.onVectorDone?.(vectorResult);
+    callbacks.sendEvent?.('vector.done', {});
+
+    // ── 3. Abstractor ──
+    callbacks.onAbstractStart?.();
+    callbacks.sendEvent?.('abstractor.start', {});
+    const abstractCb: AbstractCallbacks = {
+      onDelta: (delta) => {
+        callbacks.onAbstractDelta?.(delta);
+        callbacks.sendEvent?.('abstractor.thinking', { delta });
+      },
+      onDeltaCompleted: (content) => {
+        callbacks.sendEvent?.('abstractor.thinking', { content });
+      },
+      onError: (error) => {
+        callbacks.sendEvent?.('abstractor.error', { error });
+      },
+    };
+    const abstractorResult = await abstract(
+      remainingFlow,
+      vectorResult.filteredDomText,
+      scanResult.elementMap,
+      scanResult.url,
+      abstractCb,
+      { isSubsequentRound: totalRounds > 1 },
+    );
+    callbacks.onAbstractDone?.(abstractorResult);
+    callbacks.sendEvent?.('abstractor.done', {});
+
+    // ── 4. 逐步执行伪代码 ──
+    const elementMap = scanResult.elementMap;
+    let mutationDetected = false;
+    let mutationResult: MutationResult | null = null;
+    let mutationAtCodeIndex = -1;
+
+    callbacks.sendEvent?.('runner.start', {});
+
+    for (let i = 0; i < abstractorResult.code.length; i++) {
+      const codeLine = abstractorResult.code[i];
       const { method, args, isComment } = parsePseudo(codeLine);
-      const stepCategory = resolveStepCategory(method);
-      const lineNumber = i + 1;
+      const action = resolveActionType(method);
+      const lineNumber = stepResults.length + 1;
       const stepStart = Date.now();
 
-      callbacks.onStepStart?.({ lineNumber, code: codeLine, action: resolveActionType(method) });
+      callbacks.onStepStart?.({ lineNumber, code: codeLine, action });
 
-      // 注释行：跳过执行，标记为 skipped
+      // 跳过注释行
       if (isComment) {
-        const elapsedMs = Date.now() - stepStart;
         stepResults.push({
           lineNumber, code: codeLine, status: 'skipped',
-          action: resolveActionType(method), selector: null, value: null,
-          elapsedMs, screenshot: null, error: null,
+          action, selector: null, elementIndex: null,
+          value: null, elapsedMs: Date.now() - stepStart, screenshot: null, error: null,
         });
-        results.push({
-          step: lineNumber, success: true,
-          data: { type: resolveActionType(method), code: codeLine, pseudoCode: codeLine, category: stepCategory },
-        });
-        callbacks.onStepDone?.({ lineNumber, code: codeLine, status: 'skipped', elapsedMs });
-        callbacks.onStep?.(lineNumber, codeLines.length, codeLine, true);
+        executedLines++;
         continue;
       }
 
+      // 解析 [index] → 真实 selector
+      const resolved = resolveSelectorFromArgs(args, elementMap);
+      const selector = resolved.selector;
+      const elementIndex = resolved.elementIndex;
+      const pwSelector = selector ? toPlaywrightSelector(selector) : null;
+
       try {
-        let extractedContent: string | string[] | undefined;
+        let extracted: string | string[] | undefined;
         let screenshotBuffer: string | undefined;
 
-        // 特殊处理需要返回值的指令
+        // ── 特殊指令处理 ──
+
         if (method === 'screenshot') {
           const buffer = await page.screenshot({ fullPage: true });
           screenshotBuffer = buffer.toString('base64');
           screenshotResults.push(screenshotBuffer);
-        } else if (method === 'getText' || method === 'extract') {
-          // 带自愈的提取
-          let content = '';
-          for (let retry = 0; retry <= MAX_SELF_HEAL_RETRIES; retry++) {
-            try {
-              content = await extractContent(page, args[0]);
+
+        } else if (method === 'getText' || method === 'extract' || method === 'extractAll') {
+          if (pwSelector) {
+            let content: string | string[] = '';
+            let currentSelector = pwSelector;
+            for (let retry = 0; retry <= MAX_SELF_HEAL_RETRIES; retry++) {
+              try {
+                content = method === 'extractAll'
+                  ? await extractMultipleContent(page, currentSelector)
+                  : await extractContent(page, currentSelector);
+                break;
+              } catch (error) {
+                const msg = error instanceof Error ? error.message : '';
+                if (isDetachedError(msg) && retry < MAX_SELF_HEAL_RETRIES && selector) {
+                  callbacks.onStepError?.({
+                    lineNumber, code: codeLine,
+                    error: { type: 'element-not-found', message: msg },
+                    retrying: true, retryAttempt: retry + 1,
+                  });
+                  const newSel = await rescanForElement(page, selector);
+                  if (newSel) { currentSelector = toPlaywrightSelector(newSel); continue; }
+                }
+                throw error;
+              }
+            }
+            extracted = content;
+            extractedContents.push({ selector: selector || '', content });
+            const text = typeof content === 'string' ? content : content.join('\n');
+            textResults.push({ selector: selector || '', text, lineNumber });
+            callbacks.onExtract?.({ lineNumber, selector: selector || '', text });
+          }
+
+        } else if (method === 'extractWithRegex') {
+          if (pwSelector) {
+            const rawText = await extractContent(page, pwSelector);
+            const regex = new RegExp(args[1] || '(.+)');
+            const matchResult = rawText.match(regex);
+            extracted = matchResult?.[1] || rawText;
+            extractedContents.push({ selector: selector || '', content: extracted });
+            textResults.push({ selector: selector || '', text: extracted, lineNumber });
+            callbacks.onExtract?.({ lineNumber, selector: selector || '', text: extracted });
+          }
+
+        } else if (method === 'navigate' || method === 'open') {
+          await page.goto(args[0], { waitUntil: 'domcontentloaded' });
+
+        } else if (method === 'click' || method === 'doubleClick') {
+          // ── v2.0 核心：click 步骤使用 clickAndWaitForMutation 检测突变 ──
+          if (pwSelector && selector) {
+            const mutation = await clickAndWaitForMutation(page, selector, 5000);
+            if (mutation.type !== 'NONE') {
+              mutationDetected = true;
+              mutationResult = mutation;
+              mutationAtCodeIndex = i;
+
+              // 记录状态变更
+              const pseudoLine = abstractorResult.pseudoCode.find((p) => p.code === codeLine);
+              const flowStepIdx = pseudoLine?.sourceStep ?? -1;
+              stateChanges.push({
+                triggeredByStepIndex: flowStepIdx,
+                mutationType: mutation.type,
+                reason: mutation.type === 'URL_CHANGE'
+                  ? '页面跳转'
+                  : (mutation.description || 'DOM 突变'),
+                targetUrl: mutation.newUrl,
+                remainingStepsCount: 0, // 稍后更新
+              });
+
+              // 发送 SSE 事件
+              callbacks.sendEvent?.('state_change_detected', {
+                type: mutation.type,
+                reason: mutation.type === 'URL_CHANGE'
+                  ? '页面跳转'
+                  : (mutation.description || 'DOM 突变'),
+                targetUrl: mutation.newUrl,
+              });
+
+              log('mutation detected, will re-enter', {
+                type: mutation.type,
+                step: codeLine,
+                round: totalRounds,
+              });
+
+              // 记录当前步骤为成功
+              stepResults.push({
+                lineNumber, code: codeLine, status: 'success',
+                action: 'click', selector, elementIndex, value: null,
+                elapsedMs: Date.now() - stepStart, screenshot: null, error: null,
+              });
+              callbacks.onStepDone?.({
+                lineNumber, code: codeLine, status: 'success',
+                elapsedMs: Date.now() - stepStart,
+              });
+              executedLines++;
+
+              // Break 内层 for，继续外层 while
               break;
+            }
+          } else if (pwSelector) {
+            // 无 selector 映射的 click（不应发生，但做防御）
+            await clickWithOverlayFallback(page, pwSelector);
+          }
+
+        } else if (method === 'fill') {
+          // fill 不触发突变检测，直接执行
+          if (pwSelector) {
+            await fillWithVisibilityFallback(page, pwSelector, args[1] ?? '');
+          }
+
+        } else if (method === 'select') {
+          // select 不触发突变检测
+          if (pwSelector) {
+            try {
+              await page.selectOption(pwSelector, { label: args[1] ?? '' }, { timeout: 5000 });
             } catch (error) {
               const msg = error instanceof Error ? error.message : '';
-              if (isDetachedError(msg) && retry < MAX_SELF_HEAL_RETRIES) {
-                callbacks.onStepError?.({
-                  lineNumber, code: codeLine,
-                  error: { type: 'element-not-found', message: msg },
-                  retrying: true, retryAttempt: retry + 1,
-                });
-                const newSelector = await rescanForElement(page, args[0]);
-                if (newSelector) { args[0] = newSelector; continue; }
+              if (msg.includes('not visible')) {
+                try {
+                  await page.locator(pwSelector).scrollIntoViewIfNeeded({ timeout: 3000 });
+                  await page.waitForTimeout(300);
+                  await page.selectOption(pwSelector, { label: args[1] ?? '' }, { timeout: 5000 });
+                } catch {
+                  await page.evaluate(`
+                    (args) => {
+                      const [sel, val] = args;
+                      const el = document.querySelector(sel);
+                      if (el && el.tagName === 'SELECT') {
+                        el.value = val;
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                      }
+                    }
+                  `, [pwSelector, args[1] ?? '']);
+                }
+              } else {
+                throw error;
               }
-              throw error;
             }
           }
-          extractedContent = content;
-          extractedContents.push({ selector: args[0], content });
-          textResults.push({ selector: args[0], text: content, lineNumber });
-          callbacks.onExtract?.({ lineNumber, selector: args[0], text: content });
-          callbacks.onExtraction?.(content, args[0]);
-          log('extracted content', { selector: args[0], length: content.length });
-        } else if (method === 'extractWithRegex') {
-          const rawText = await extractContent(page, args[0]);
-          const regex = new RegExp(args[1] || '(.+)');
-          const matchResult = rawText.match(regex);
-          extractedContent = matchResult?.[1] || rawText;
-          extractedContents.push({ selector: args[0], content: extractedContent });
-          textResults.push({ selector: args[0], text: extractedContent, lineNumber });
-          callbacks.onExtract?.({ lineNumber, selector: args[0], text: extractedContent });
-          callbacks.onExtraction?.(extractedContent, args[0]);
-        } else if (method === 'extractAll') {
-          extractedContent = await extractMultipleContent(page, args[0]);
-          extractedContents.push({ selector: args[0], content: extractedContent });
-          const combinedText = Array.isArray(extractedContent) ? extractedContent.join('\n') : extractedContent;
-          textResults.push({ selector: args[0], text: combinedText, lineNumber });
-          callbacks.onExtract?.({ lineNumber, selector: args[0], text: combinedText });
-          callbacks.onExtraction?.(extractedContent, args[0]);
+
+        } else if (method === 'check') {
+          if (pwSelector) await page.check(pwSelector);
+        } else if (method === 'uncheck') {
+          if (pwSelector) await page.uncheck(pwSelector);
+        } else if (method === 'scrollDown') {
+          await page.mouse.wheel(0, 800);
+        } else if (method === 'scrollUp') {
+          await page.mouse.wheel(0, -800);
+        } else if (method === 'waitForElementVisible') {
+          if (pwSelector) await page.waitForSelector(pwSelector, { state: 'visible', timeout: 10000 });
+        } else if (method === 'scrollToElement') {
+          if (pwSelector) await page.locator(pwSelector).scrollIntoViewIfNeeded({ timeout: 5000 });
         } else if (method === 'wait') {
-          // 智能等待替代硬等待
           const waitArg = args[0];
           if (waitArg && /^\d+$/.test(waitArg)) {
             await smartWait(page, parseInt(waitArg));
-          } else if (waitArg) {
-            await page.waitForSelector(waitArg, { state: 'visible', timeout: 10000 });
+          } else if (waitArg && pwSelector) {
+            await page.waitForSelector(pwSelector, { state: 'visible', timeout: 10000 });
           } else {
             await smartWait(page, 2000);
           }
-        } else if (method === 'waitForElementVisible') {
-          await page.waitForSelector(args[0], { state: 'visible', timeout: 10000 });
-        } else if (method === 'scrollToElement') {
-          await page.locator(args[0]).scrollIntoViewIfNeeded({ timeout: 5000 });
         } else {
-          // 带自愈的交互操作
-          for (let retry = 0; retry <= MAX_SELF_HEAL_RETRIES; retry++) {
-            try {
-              await executeStep(page, method, args);
-              break;
-            } catch (error) {
-              const msg = error instanceof Error ? error.message : '';
-              if (isDetachedError(msg) && retry < MAX_SELF_HEAL_RETRIES) {
-                callbacks.onStepError?.({
-                  lineNumber, code: codeLine,
-                  error: { type: 'element-not-found', message: msg },
-                  retrying: true, retryAttempt: retry + 1,
-                });
-                log('self-heal retry', { method, selector: args[0], attempt: retry + 1 });
-                const newSelector = await rescanForElement(page, args[0]);
-                if (newSelector) {
-                  args[0] = newSelector;
-                  log('self-heal found new selector', { oldSelector: args[0], newSelector });
-                  continue;
-                }
-              }
-              throw error;
-            }
+          // 未知方法：尝试 click
+          if (pwSelector) await clickWithOverlayFallback(page, pwSelector);
+        }
+
+        // 如果没有被 mutation break，记录成功
+        if (!mutationDetected) {
+          const elapsedMs = Date.now() - stepStart;
+          stepResults.push({
+            lineNumber, code: codeLine, status: 'success',
+            action, selector, elementIndex, value: resolved.value,
+            elapsedMs, screenshot: screenshotBuffer || null, error: null,
+          });
+          callbacks.onStepDone?.({ lineNumber, code: codeLine, status: 'success', elapsedMs, screenshot: screenshotBuffer });
+          executedLines++;
+
+          // 步骤间等待
+          if (i < abstractorResult.code.length - 1) {
+            await smartWait(page, stepDelay);
           }
         }
 
-        const elapsedMs = Date.now() - stepStart;
-        const targetElement = vector.elements.find((el) => el.selector === args[0]);
-
-        stepResults.push({
-          lineNumber, code: codeLine, status: 'success',
-          action: resolveActionType(method), selector: args[0] || null, value: args[1] ?? null,
-          elapsedMs, screenshot: screenshotBuffer || null, error: null,
-        });
-
-        results.push({
-          step: lineNumber, success: true,
-          data: {
-            type: resolveActionType(method), code: codeLine, pseudoCode: codeLine, category: stepCategory,
-            target: targetElement ? {
-              uid: targetElement.uid, selector: targetElement.selector,
-              tag: targetElement.tag, role: targetElement.role,
-            } : undefined,
-            extracted: extractedContent,
-          },
-          ...(screenshotBuffer && { screenshot: screenshotBuffer }),
-        });
-
-        callbacks.onStepDone?.({ lineNumber, code: codeLine, status: 'success', elapsedMs, screenshot: screenshotBuffer });
-        callbacks.onStep?.(lineNumber, codeLines.length, codeLine, true);
-
-        // 步骤间智能等待（替代硬等待）
-        if (i < codeLines.length - 1) {
-          await smartWait(page, stepDelay);
-        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         success = false;
 
         const elapsedMs = Date.now() - stepStart;
-
         stepResults.push({
           lineNumber, code: codeLine, status: 'failed',
-          action: resolveActionType(method), selector: args[0] || null, value: args[1] ?? null,
+          action, selector, elementIndex, value: resolved.value,
           elapsedMs, screenshot: null, error: message,
         });
 
-        results.push({
-          step: lineNumber, success: false, error: message,
-          data: { type: resolveActionType(method), code: codeLine, pseudoCode: codeLine, category: stepCategory },
-        });
-
         runnerError = {
-          type: /timeout/i.test(message) ? 'timeout' : /not found|no element/i.test(message) ? 'element-not-found' : 'execution-error',
+          type: /timeout/i.test(message) ? 'timeout'
+            : /not found|no element/i.test(message) ? 'element-not-found'
+            : 'execution-error',
           lineNumber, code: codeLine, message, screenshot: null,
         };
 
@@ -650,37 +772,65 @@ export async function run(
           error: { type: runnerError.type, message },
           retrying: false, retryAttempt: 0,
         });
-        callbacks.onStep?.(lineNumber, codeLines.length, codeLine, false, message);
-        break;
+
+        executedLines++;
+        break; // 错误时退出内层 for
       }
     }
-  } catch (error) {
-    if (!results.length) {
-      const message = error instanceof Error ? error.message : String(error);
-      success = false;
-      runnerError = { type: 'navigation-failed', lineNumber: 0, code: '', message, screenshot: null };
-      log('error', { message });
-      callbacks.onError?.(message);
+
+    callbacks.sendEvent?.('runner.done', {});
+
+    // ── 检查是否所有步骤都成功执行 ──
+    if (!mutationDetected) {
+      log('all steps executed, no mutation', { round: totalRounds });
+      break; // 退出 while 循环
+    }
+
+    // ── Mutation: 计算剩余 flow steps ──
+    const mutationPseudoLine = abstractorResult.pseudoCode.find(
+      (p) => p.code === abstractorResult.code[mutationAtCodeIndex],
+    );
+    const completedFlowIdx = mutationPseudoLine?.sourceStep ?? 0;
+    remainingFlow = remainingFlow.slice(completedFlowIdx + 1);
+
+    // 更新最后一条 stateChange 的 remainingStepsCount
+    if (stateChanges.length > 0) {
+      stateChanges[stateChanges.length - 1].remainingStepsCount = remainingFlow.length;
+    }
+
+    log('re-entering with remaining flow', {
+      round: totalRounds,
+      remainingSteps: remainingFlow.length,
+      mutationType: mutationResult?.type,
+    });
+
+    // 剩余步骤为空则完成
+    if (remainingFlow.length === 0) {
+      log('no remaining flow steps, done');
+      break;
+    }
+
+    // 等待页面稳定后进入下一轮
+    await smartWait(page, 2000);
+  }
+
+  // ── 构建结果 ──
+
+  // 达到最大轮次仍未完成
+  if (remainingFlow.length > 0 && totalRounds >= maxRounds) {
+    log('max rounds reached', { maxRounds, remainingSteps: remainingFlow.length });
+    success = false;
+    if (!runnerError) {
+      runnerError = {
+        type: 'execution-error',
+        lineNumber: 0,
+        code: '',
+        message: `达到最大重入轮次 (${maxRounds})，仍有 ${remainingFlow.length} 步未执行`,
+        screenshot: null,
+      };
     }
   }
 
-  // 结果断言（6.4）：依据 Intention 的 expectedOutcome 进行轻量级文本校验
-  if (success && intention?.flow) {
-    for (const step of intention.flow) {
-      if (step.expectedOutcome && step.action === 'extract') {
-        const extracted = extractedContents.find((e) => e.content);
-        if (extracted && !String(extracted.content).includes(step.expectedOutcome)) {
-          log('assertion warning', {
-            expected: step.expectedOutcome,
-            actual: String(extracted.content).substring(0, 100),
-            step: step.target,
-          });
-        }
-      }
-    }
-  }
-
-  // 构建 ExtractedContent
   let extractedContent: ExtractedContent | null = null;
   if (textResults.length > 0 || screenshotResults.length > 0) {
     const type = textResults.length > 0 && screenshotResults.length > 0
@@ -690,7 +840,14 @@ export async function run(
   }
 
   const totalElapsedMs = Date.now() - start;
-  log('done', { success, steps: results.length, totalElapsedMs, extractedCount: extractedContents.length });
+  log('state machine done', {
+    success,
+    totalRounds,
+    steps: stepResults.length,
+    totalElapsedMs,
+    stateChanges: stateChanges.length,
+    extractedCount: extractedContents.length,
+  });
 
   return {
     success,
@@ -699,8 +856,11 @@ export async function run(
     finalScreenshot: screenshotResults[screenshotResults.length - 1] || null,
     error: runnerError,
     totalElapsedMs,
-    results,
+    results: stepResults,
     duration: totalElapsedMs,
     extractedContents,
+    stateChanges,
+    totalRounds,
+    executedLines,
   };
 }

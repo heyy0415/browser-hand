@@ -1,24 +1,16 @@
-/** Layer 3: Vector — 本地向量相似性检索（使用 transformer.js） */
+/** Layer 3: Vector Gateway (v2.0) — 智能过滤网关
+ * Plan A: 代码硬过滤（99% 场景，0 延迟）
+ * Plan B: 语义降级（1% 模糊场景，transformers.js 向量检索）
+ */
 
 import { pipeline, env } from '@xenova/transformers';
-import { createSSEStream, logger } from '../llm';
-import type {
-  IntentionResult,
-  ScannerResult,
-  VectorOptions,
-  VectorResult,
-  ElementSnapshot,
-  FunctionalZone,
-  PageZone,
-  FlowStep,
-  VectorMatch,
-  PageCapabilities,
-} from '../types';
+import { logger } from '../llm';
+import type { DomText, ElementMap, VectorGatewayResult, VectorGatewayRoute, FlowStep } from '../types';
 
 const log = (msg: string, meta?: unknown) => logger.info('vector', msg, meta);
 
 // ═══════════════════════════════════════════════════════════════════════
-// Transformer.js 配置
+// Transformer.js 配置（Plan B 降级时使用）
 // ═══════════════════════════════════════════════════════════════════════
 
 env.cacheDir = './.model-cache';
@@ -29,24 +21,21 @@ let loadingPromise: Promise<void> | null = null;
 
 async function getEmbeddingPipeline(): Promise<NonNullable<typeof embeddingPipeline>> {
   if (embeddingPipeline) return embeddingPipeline;
-
   if (loadingPromise) {
     await loadingPromise;
     if (embeddingPipeline) return embeddingPipeline;
   }
-
   loadingPromise = (async () => {
     log('loading model', { model: MODEL_NAME });
     embeddingPipeline = await pipeline('feature-extraction', MODEL_NAME, { quantized: true });
     log('model loaded');
   })();
-
   await loadingPromise;
   return embeddingPipeline!;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Embedding 缓存
+// Embedding 缓存与计算（保留底层工具）
 // ═══════════════════════════════════════════════════════════════════════
 
 const embeddingCache = new Map<string, number[]>();
@@ -60,29 +49,21 @@ function getCacheKey(text: string): string {
   return `${text.length}:${hash}`;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 向量计算
-// ═══════════════════════════════════════════════════════════════════════
-
 export async function getEmbedding(text: string): Promise<number[]> {
   const cacheKey = getCacheKey(text);
   if (embeddingCache.has(cacheKey)) return embeddingCache.get(cacheKey)!;
-
   const extractor = await getEmbeddingPipeline();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const output = await extractor(text, { pooling: 'mean', normalize: true } as any);
   const embedding = Array.from((output as { data: Float32Array }).data);
-
   embeddingCache.set(cacheKey, embedding);
   return embedding;
 }
 
 export async function getEmbeddings(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
-
   const results: number[][] = new Array(texts.length);
   const uncached: { index: number; text: string }[] = [];
-
   for (let i = 0; i < texts.length; i++) {
     const cacheKey = getCacheKey(texts[i]);
     if (embeddingCache.has(cacheKey)) {
@@ -91,7 +72,6 @@ export async function getEmbeddings(texts: string[]): Promise<number[][]> {
       uncached.push({ index: i, text: texts[i] });
     }
   }
-
   if (uncached.length > 0) {
     const extractor = await getEmbeddingPipeline();
     for (const { index, text } of uncached) {
@@ -102,20 +82,17 @@ export async function getEmbeddings(texts: string[]): Promise<number[][]> {
       embeddingCache.set(getCacheKey(text), embedding);
     }
   }
-
   return results;
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length) return 0;
-
   let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
     normA += a[i] * a[i];
     normB += b[i] * b[i];
   }
-
   return normA && normB ? dot / (Math.sqrt(normA) * Math.sqrt(normB)) : 0;
 }
 
@@ -132,562 +109,302 @@ export function findTopKSimilar<T>(
     .slice(0, k);
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// 元素文本表示生成
-// ═══════════════════════════════════════════════════════════════════════
-
-function generateElementEmbeddingText(element: ElementSnapshot): string {
-  const parts: string[] = [];
-
-  if (element.semantics?.description) parts.push(element.semantics.description);
-  if (element.label) parts.push(element.label);
-  if (element.text) parts.push(element.text.substring(0, 100));
-  parts.push(`${element.tag} ${element.role}`);
-  if (element.semantics?.zone) parts.push(`位于${element.semantics.zone}区域`);
-  if (element.semantics?.interactionHint) parts.push(`交互类型:${element.semantics.interactionHint}`);
-
-  // 选择器语义
-  const semanticPatterns = [
-    { pattern: /search|搜索/gi, label: '搜索' },
-    { pattern: /submit|提交/gi, label: '提交' },
-    { pattern: /login|登录/gi, label: '登录' },
-    { pattern: /btn|button/gi, label: '按钮' },
-    { pattern: /input|输入/gi, label: '输入' },
-    { pattern: /nav|导航/gi, label: '导航' },
-    { pattern: /form|表单/gi, label: '表单' },
-  ];
-
-  for (const { pattern, label } of semanticPatterns) {
-    if (pattern.test(element.selector) && !parts.includes(label)) {
-      parts.push(label);
-    }
-  }
-
-  return parts.join(' ');
+export async function preloadModel(): Promise<void> {
+  await getEmbeddingPipeline();
 }
-
-function generateStepSearchQuery(step: FlowStep): string {
-  const parts: string[] = [step.target, step.desc];
-
-  if (step.elementHint?.keywords) parts.push(...step.elementHint.keywords);
-  if (step.elementHint?.interactionHint) parts.push(step.elementHint.interactionHint);
-
-  const actionDescriptions: Record<string, string> = {
-    fill: '输入框 文本框',
-    click: '按钮 链接 可点击',
-    select: '下拉选择 选项',
-    check: '复选框 单选框',
-    extract: '文本 内容',
-  };
-  if (actionDescriptions[step.action]) parts.push(actionDescriptions[step.action]);
-
-  return parts.join(' ');
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// 向量相似性检索
-// ═══════════════════════════════════════════════════════════════════════
-
-async function embedElements(elements: ElementSnapshot[]): Promise<void> {
-  const texts = elements.map((el) => {
-    el.embeddingText = generateElementEmbeddingText(el);
-    return el.embeddingText;
-  });
-
-  const embeddings = await getEmbeddings(texts);
-  for (let i = 0; i < elements.length; i++) {
-    elements[i].embedding = embeddings[i];
-  }
-}
-
-async function embedStep(step: FlowStep): Promise<number[]> {
-  step.searchQuery = generateStepSearchQuery(step);
-  return getEmbedding(step.searchQuery);
-}
-
-function findElementsByEmbedding(
-  queryVector: number[],
-  elements: ElementSnapshot[],
-  topK: number,
-  minScore: number,
-): Array<{ element: ElementSnapshot; score: number }> {
-  const items = elements
-    .filter((el) => el.embedding)
-    .map((el) => ({ vector: el.embedding!, item: el }));
-
-  return findTopKSimilar(queryVector, items, topK, minScore)
-    .map((r) => ({ element: r.item, score: r.score }));
-}
-
-function findElementsByKeyword(
-  step: FlowStep,
-  elements: ElementSnapshot[],
-): Array<{ element: ElementSnapshot; score: number }> {
-  const keywords: string[] = [
-    ...(step.elementHint?.keywords || []),
-    ...(step.target && step.target.length >= 2 ? [step.target] : []),
-  ];
-
-  return elements
-    .map((element) => {
-      let score = 0;
-      const text = `${element.label} ${element.text} ${element.selector} ${element.semantics?.description || ''}`.toLowerCase();
-
-      for (const keyword of keywords) {
-        if (text.includes(keyword.toLowerCase())) score += 0.3;
-      }
-
-      if (step.elementHint?.interactionHint && element.semantics?.interactionHint === step.elementHint.interactionHint) {
-        score += 0.2;
-      }
-
-      return { element, score: Math.min(score, 1) };
-    })
-    .filter((r) => r.score > 0)
-    .sort((a, b) => b.score - a.score);
-}
-
-function hybridSearch(
-  step: FlowStep,
-  queryVector: number[],
-  elements: ElementSnapshot[],
-  topK: number,
-  minScore: number,
-): VectorMatch[] {
-  const matches: Map<string, VectorMatch> = new Map();
-
-  // 1. 语义向量检索 (权重 0.5)
-  for (const { element, score } of findElementsByEmbedding(queryVector, elements, topK * 2, minScore)) {
-    matches.set(element.uid, {
-      element,
-      score: score * 0.5,
-      reason: `向量相似度: ${(score * 100).toFixed(1)}%`,
-      matchType: 'embedding',
-    });
-  }
-
-  // 2. 关键词检索 (权重 0.2)
-  for (const { element, score } of findElementsByKeyword(step, elements)) {
-    const existing = matches.get(element.uid);
-    if (existing) {
-      existing.score += score * 0.2;
-    } else {
-      matches.set(element.uid, {
-        element,
-        score: score * 0.2,
-        reason: '关键词匹配',
-        matchType: 'keyword',
-      });
-    }
-  }
-
-  // 3. 位置与层级评分 (权重 0.3)
-  computePositionalScore(step, matches);
-
-  // 4. elementHint 精准匹配加分
-  if (step.elementHint) {
-    for (const match of matches.values()) {
-      let hintScore = 0;
-
-      if (step.elementHint.interactionHint && match.element.semantics?.interactionHint === step.elementHint.interactionHint) {
-        hintScore += 0.15;
-      }
-      if (step.elementHint.roleHint?.some((r) => match.element.role.includes(r))) {
-        hintScore += 0.1;
-      }
-      if (step.elementHint.zoneHint?.some((z) => match.element.semantics?.zone?.includes(z))) {
-        hintScore += 0.1;
-      }
-
-      if (hintScore > 0) {
-        match.score += hintScore;
-        match.matchType = 'hint';
-        match.reason += ' + 特征匹配';
-      }
-    }
-  }
-
-  return Array.from(matches.values())
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
-}
-
-/** 位置排序引擎：解析 positionalHint，对同组元素按坐标排序加分 */
-function computePositionalScore(
-  step: FlowStep,
-  matches: Map<string, VectorMatch>,
-): void {
-  const hint = step.positionalHint;
-  if (!hint) return;
-
-  const matchList = Array.from(matches.values());
-
-  if (hint.ordinal) {
-    // 按 zone 分组（scope=zone 时）或整体排序
-    const groups = new Map<string, VectorMatch[]>();
-    for (const match of matchList) {
-      const key = hint.scope === 'zone'
-        ? (match.element.semantics?.zone || 'unknown')
-        : '__all__';
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push(match);
-    }
-
-    // 仅在有 zoneHint 的组或全部元素中排序
-    const targetZones = step.elementHint?.zoneHint || [];
-    for (const [zone, groupMatches] of groups) {
-      // 如果有 zoneHint 且当前组不在 zoneHint 中，跳过
-      if (hint.scope === 'zone' && targetZones.length > 0 && !targetZones.includes(zone as any)) continue;
-
-      // 按 y 坐标排序
-      groupMatches.sort((a, b) => {
-        if (hint.ordinal! > 0) return a.element.rect.y - b.element.rect.y; // 升序：取最上面的
-        return b.element.rect.y - a.element.rect.y; // 降序：取最下面的
-      });
-
-      // 对排序靠前的元素加分
-      const absOrdinal = Math.abs(hint.ordinal);
-      for (let i = 0; i < groupMatches.length; i++) {
-        if (i < absOrdinal) {
-          // 越靠前加分越多
-          const bonus = 0.3 * (1 - i / Math.max(groupMatches.length, 1));
-          groupMatches[i].score += bonus;
-          groupMatches[i].matchType = 'positional';
-          groupMatches[i].reason += ` + 位置排序(第${i + 1})`;
-        }
-      }
-    }
-  }
-
-  if (hint.direction) {
-    // 方向提示：根据方向给元素加分
-    for (const match of matchList) {
-      const rect = match.element.rect;
-      const viewport = { width: 1920, height: 1080 }; // 默认视口
-      let dirScore = 0;
-
-      switch (hint.direction) {
-        case 'top':
-          dirScore = 0.15 * (1 - rect.y / viewport.height);
-          break;
-        case 'bottom':
-          dirScore = 0.15 * (rect.y / viewport.height);
-          break;
-        case 'left':
-          dirScore = 0.15 * (1 - rect.x / viewport.width);
-          break;
-        case 'right':
-          dirScore = 0.15 * (rect.x / viewport.width);
-          break;
-      }
-
-      if (dirScore > 0) {
-        match.score += dirScore;
-        if (match.matchType !== 'positional') match.matchType = 'positional';
-        match.reason += ` + 方向匹配(${hint.direction})`;
-      }
-    }
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// 页面能力分析
-// ═══════════════════════════════════════════════════════════════════════
-
-function analyzePageCapabilities(elements: ElementSnapshot[], title: string, url: string): PageCapabilities {
-  const zones: Record<FunctionalZone, ElementSnapshot[]> = {
-    'navigation': [], 'search': [], 'main-content': [], 'sidebar': [],
-    'header': [], 'footer': [], 'modal': [], 'form': [],
-    'list': [], 'card': [], 'trending': [], 'unknown': [],
-  };
-
-  for (const el of elements) {
-    zones[el.semantics?.zone || 'unknown'].push(el);
-  }
-
-  const zoneDescriptions: Record<FunctionalZone, string> = {
-    'navigation': '导航区域', 'search': '搜索区域', 'main-content': '主要内容区域',
-    'sidebar': '侧边栏', 'header': '页面头部', 'footer': '页面底部',
-    'modal': '弹窗/对话框', 'form': '表单区域', 'list': '列表区域',
-    'card': '卡片/商品区域', 'trending': '热搜/热门区域', 'unknown': '其他区域',
-  };
-
-  const pageZones: PageZone[] = Object.entries(zones)
-    .filter(([, els]) => els.length > 0)
-    .map(([zone, els]) => ({
-      zone: zone as FunctionalZone,
-      elementCount: els.length,
-      description: zoneDescriptions[zone as FunctionalZone],
-      keyElements: els.slice(0, 3)
-        .map((el) => el.semantics?.description || el.label || el.selector)
-        .filter(Boolean),
-    }));
-
-  const hasSearch = elements.some((el) =>
-    el.role === 'searchbox' ||
-    (el.semantics?.interactionHint === 'input' && /search|搜索|keyword|query|kw/i.test(el.selector + ' ' + (el.label || ''))),
-  );
-
-  const hasLogin = elements.some((el) =>
-    /login|登录|signin|sign-in/i.test((el.label || '') + ' ' + el.selector) ||
-    (el.semantics?.interactionHint === 'submit' && /login|登录/.test((el.label || '') + ' ' + (el.text || ''))),
-  );
-
-  const hasForm = elements.some((el) =>
-    el.semantics?.zone === 'form' || el.tag === 'form' || el.role === 'text-input',
-  );
-
-  const urlLower = url.toLowerCase();
-  const titleLower = title.toLowerCase();
-
-  let pageType: PageCapabilities['pageType'] = 'unknown';
-  if (hasSearch && /google|baidu|bing|search/i.test(urlLower + titleLower)) pageType = 'search-engine';
-  else if (/taobao|jd|amazon|shop|mall|buy|cart/i.test(urlLower + titleLower)) pageType = 'e-commerce';
-  else if (/weibo|twitter|facebook|instagram|douyin|tiktok/i.test(urlLower + titleLower)) pageType = 'social-media';
-  else if (zones['card'].length > 3 || zones['list'].length > 0) pageType = 'content';
-  else if (hasForm || zones['form'].length > 2) pageType = 'form';
-  else if (/dashboard|console|admin/i.test(urlLower + titleLower)) pageType = 'dashboard';
-
-  const mainFunctions: string[] = [];
-  if (hasSearch) mainFunctions.push('搜索功能');
-  if (hasLogin) mainFunctions.push('登录功能');
-  if (zones['navigation'].length > 0) mainFunctions.push('导航功能');
-  if (zones['card'].length > 3) mainFunctions.push('内容浏览');
-  if (zones['form'].length > 0) mainFunctions.push('表单填写');
-
-  return {
-    mainFunctions: mainFunctions.slice(0, 3),
-    zones: pageZones,
-    pageType,
-    hasSearch,
-    hasLogin,
-    hasForm,
-  };
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// 回调接口
-// ═══════════════════════════════════════════════════════════════════════
-
-export interface VectorCallbacks {
-  /** 硬过滤完成回调 */
-  onFiltering?: (data: { stepIndex: number; before: number; after: number; filters: Array<{ rule: string; removed: number }> }) => void;
-  /** 向量计算完成回调 */
-  onComputing?: (data: { stepIndex: number; elementsIndexed: number; vectorComputeMs: number }) => void;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// 导出接口
-// ═══════════════════════════════════════════════════════════════════════
 
 export async function isModelReady(): Promise<boolean> {
   return embeddingPipeline !== null;
-}
-
-export async function preloadModel(): Promise<void> {
-  await getEmbeddingPipeline();
 }
 
 export function clearEmbeddingCache(): void {
   embeddingCache.clear();
 }
 
-/** 向量检索主函数 */
-export async function vectorize(
-  scan: ScannerResult,
-  intention: IntentionResult,
-  options: VectorOptions & VectorCallbacks = {},
-): Promise<VectorResult> {
-  const topK = options.topK || 20;
-  const minScore = options.minScore || 0.3;
+// ═══════════════════════════════════════════════════════════════════════
+// v2.0 智能网关核心
+// ═══════════════════════════════════════════════════════════════════════
 
-  log('start', { elementCount: scan.elements.length, hasFlow: !!intention.flow });
-
-  // 1. 为所有元素生成 embedding
-  log('generating embeddings');
-  const vectorComputeStart = Date.now();
-  await embedElements(scan.elements);
-  const vectorComputeMs = Date.now() - vectorComputeStart;
-
-  // 2. 分析页面能力
-  const capabilities = analyzePageCapabilities(scan.elements, scan.title || '', scan.url);
-
-  // 3. 无 flow 时返回默认元素
-  if (!intention.flow || intention.flow.length === 0) {
-    return {
-      url: scan.url,
-      title: scan.title || '',
-      matches: scan.elements.slice(0, topK).map((el) => ({
-        element: el, score: 0.5, reason: '默认返回', matchType: 'keyword' as const,
-      })),
-      elements: scan.elements.slice(0, topK),
-      visibleText: scan.visibleText || [],
-      capabilities,
-      success: true,
-      message: '无操作流程，返回默认元素',
-    };
-  }
-
-  // 4. 为每个步骤进行向量检索
-  const allMatches: VectorMatch[] = [];
-  const matchedElementIds = new Set<string>();
-
-  for (let stepIndex = 0; stepIndex < intention.flow.length; stepIndex++) {
-    const step = intention.flow[stepIndex];
-    if (step.action === 'navigate') continue;
-
-    log(`embedding step ${stepIndex}: ${step.action}`);
-
-    // 硬过滤
-    const beforeFilter = scan.elements.length;
-    const filters: Array<{ rule: string; removed: number }> = [];
-
-    let filteredElements = scan.elements.filter((el) => {
-      // interactionHint 软过滤：允许相似类型通过
-      if (step.elementHint?.interactionHint) {
-        const hint = step.elementHint.interactionHint;
-        const elHint = el.semantics?.interactionHint;
-        // 完全匹配：通过
-        if (elHint === hint) return true;
-        // 交互类型兼容性映射：submit 和 action 互通（按钮既可能是 submit 也可能是 action）
-        const compatibleHints: Record<string, string[]> = {
-          submit: ['action'],
-          action: ['submit', 'cancel'],
-          input: ['selection'],
-          selection: ['input'],
-        };
-        if (compatibleHints[hint]?.includes(elHint || '')) return true;
-        // 不兼容：过滤掉
-        return false;
-      }
-      return true;
-    });
-    const interactionRemoved = beforeFilter - filteredElements.length;
-    if (interactionRemoved > 0) {
-      filters.push({ rule: `interactionHint=${step.elementHint?.interactionHint || '*'}`, removed: interactionRemoved });
-    }
-
-    // 层级约束硬过滤：zoneHint 含 modal 时，过滤 parentContext 不匹配的元素
-    if (step.elementHint?.zoneHint?.length && step.elementHint.zoneHint.includes('modal' as any)) {
-      const beforeLayerFilter = filteredElements.length;
-      filteredElements = filteredElements.filter((el) =>
-        el.semantics?.zone === 'modal' || (el.semantics?.parentContext && /登录|弹窗|模态/i.test(el.semantics.parentContext))
-      );
-      const layerRemoved = beforeLayerFilter - filteredElements.length;
-      if (layerRemoved > 0) {
-        filters.push({ rule: 'layerConstraint=modal', removed: layerRemoved });
-      }
-    }
-
-    const afterFilter = filteredElements.length;
-
-    if (options.onFiltering) {
-      options.onFiltering({
-        stepIndex,
-        before: beforeFilter,
-        after: afterFilter,
-        filters,
-      });
-    }
-
-    const queryVector = await embedStep(step);
-
-    // 向量计算回调
-    if (options.onComputing) {
-      options.onComputing({
-        stepIndex,
-        elementsIndexed: filteredElements.length,
-        vectorComputeMs,
-      });
-    }
-
-    // 使用过滤后的元素（修复 Bug：原版使用 scan.elements 导致过滤无效）
-    const stepMatches = hybridSearch(step, queryVector, filteredElements, Math.ceil(topK / intention.flow.length), minScore);
-
-    for (const match of stepMatches) {
-      // 允许同一元素被不同步骤匹配（去重仅针对相同 stepIndex）
-      const dedupeKey = `${match.element.uid}:${stepIndex}`;
-      if (!matchedElementIds.has(dedupeKey)) {
-        matchedElementIds.add(dedupeKey);
-        match.matchedStep = stepIndex;
-        allMatches.push(match);
-      }
-    }
-  }
-
-  // 5. 排序取 topK
-  allMatches.sort((a, b) => b.score - a.score);
-  const selectedElements = allMatches.slice(0, topK).map((m) => m.element);
-
-  // 6. 按区域分组
-  const groupedElements: Record<FunctionalZone, ElementSnapshot[]> = {
-    'navigation': [], 'search': [], 'main-content': [], 'sidebar': [],
-    'header': [], 'footer': [], 'modal': [], 'form': [],
-    'list': [], 'card': [], 'trending': [], 'unknown': [],
-  };
-  for (const el of selectedElements) {
-    groupedElements[el.semantics?.zone || 'unknown'].push(el);
-  }
-
-  log('done', { matchedCount: selectedElements.length, topScore: allMatches[0]?.score?.toFixed(2) });
-
-  return {
-    url: scan.url,
-    title: scan.title || '',
-    matches: allMatches.slice(0, topK),
-    elements: selectedElements,
-    visibleText: scan.visibleText || [],
-    capabilities,
-    groupedElements,
-    success: true,
-    message: `向量检索完成，匹配 ${selectedElements.length} 个元素`,
-  };
+export interface VectorCallbacks {
+  /** 网关路由决策回调 */
+  onGateway?: (data: { route: VectorGatewayRoute; originalLines: number; filteredLines: number; compressionRatio: string }) => void;
 }
 
-/** SSE 流式处理版本 */
-export async function processVector(
-  scan: ScannerResult,
-  intention: IntentionResult,
-  options: VectorOptions = {},
-  sessionId: string = '',
-): Promise<{ stream: ReadableStream<Uint8Array>; result: Promise<VectorResult> }> {
-  const { stream, send, close } = createSSEStream();
+/**
+ * 判断 flow 是否属于"极度模糊"指令
+ * 当所有 step 的 elementHint 和 positionalHint 均为空/unknown 时返回 true
+ */
+export function isVagueFlow(flow: FlowStep[]): boolean {
+  if (flow.length === 0) return true;
+  return flow.every((step) => {
+    const noKeywords = !step.elementHint?.keywords?.length;
+    const noOrdinal = !step.positionalHint?.ordinal;
+    const noDirection = !step.positionalHint?.direction;
+    const zoneUnknown = !step.elementHint?.zoneHint?.length || step.elementHint.zoneHint.every((z) => z === 'unknown');
+    return noKeywords && noOrdinal && noDirection && zoneUnknown;
+  });
+}
 
-  const result = (async () => {
-    send('vector.start', { stepIndex: 0, target: '', totalElements: scan.elements.length }, sessionId);
-    const vectorResult = await vectorize(scan, intention, {
-      ...options,
-      onFiltering: (data) => send('vector.filtering', data, sessionId),
-      onComputing: (data) => send('vector.computing', data, sessionId),
+/**
+ * 物理切割 domText 行：仅保留 hitIndices 中包含的行（及其邻居）
+ */
+function pruneDomText(domText: DomText, hitIndices: Set<number>): DomText {
+  const lines = domText.split('\n');
+  const result: string[] = [];
+
+  for (const idx of hitIndices) {
+    if (idx >= 0 && idx < lines.length) {
+      result.push(lines[idx]);
+    }
+  }
+
+  return result.join('\n');
+}
+
+/**
+ * Plan A 硬过滤逻辑
+ * 根据 FlowStep 的结构化特征对 elementMap 进行暴力裁剪
+ */
+function planAHardFilter(flow: FlowStep[], elementMap: ElementMap): Set<number> {
+  const hitIndices = new Set<number>();
+  const entries = Object.entries(elementMap);
+
+  for (const step of flow) {
+    // 跳过 navigate 步骤
+    if (step.action === 'navigate') continue;
+
+    let candidates = entries;
+
+    // 1. 空间硬拦截（direction）
+    if (step.positionalHint?.direction) {
+      const dir = step.positionalHint.direction;
+      candidates = candidates.filter(([, m]) => {
+        if (dir === 'bottom') return m.yRatio > 0.6;
+        if (dir === 'top') return m.yRatio < 0.4;
+        if (dir === 'left') return m.rect.x < 0.33;
+        if (dir === 'right') return m.rect.x > 0.66;
+        // 复合方向
+        if (dir.startsWith('bottom')) return m.yRatio > 0.5;
+        if (dir.startsWith('top')) return m.yRatio < 0.5;
+        return true;
+      });
+    }
+
+    // 2. 序号拦截（ordinal）
+    if (step.positionalHint?.ordinal) {
+      const ordinal = step.positionalHint.ordinal;
+      candidates = [...candidates].sort((a, b) => a[1].rect.y - b[1].rect.y);
+      if (ordinal > 0) {
+        candidates = candidates.slice(ordinal - 1, ordinal);
+      } else if (ordinal === -1) {
+        candidates = candidates.slice(-1);
+      }
+    }
+
+    // 3. 区域拦截（zoneHint）
+    if (step.elementHint?.zoneHint?.length) {
+      const zones = step.elementHint.zoneHint.filter((z) => z !== 'unknown');
+      if (zones.length > 0) {
+        candidates = candidates.filter(([, m]) => zones.some((z) => m.zone === z));
+      }
+    }
+
+    // 4. 角色拦截（roleHint / interactionHint）
+    if (step.elementHint?.roleHint?.length) {
+      const roles = step.elementHint.roleHint;
+      candidates = candidates.filter(([, m]) => roles.some((r) => m.role.includes(r)));
+    }
+    if (step.elementHint?.interactionHint) {
+      const hint = step.elementHint.interactionHint;
+      candidates = candidates.filter(([, m]) => {
+        if (m.role === hint) return true;
+        // 兼容映射
+        if (hint === 'submit' && m.role === 'button') return true;
+        if (hint === 'action' && (m.role === 'button' || m.role === 'clickable')) return true;
+        if (hint === 'input' && (m.role === 'text-input' || m.role === 'searchbox' || m.role === 'textarea')) return true;
+        if (hint === 'selection' && (m.role === 'select' || m.role === 'checkbox' || m.role === 'radio')) return true;
+        return false;
+      });
+    }
+
+    // 5. 关键词兜底（rawText includes）
+    const kws = step.elementHint?.keywords?.length
+      ? step.elementHint.keywords
+      : step.target ? [step.target] : [];
+    if (kws.length > 0 && kws[0]) {
+      const filteredByKw = candidates.filter(([, m]) =>
+        kws.some((k) => m.rawText.toLowerCase().includes(k.toLowerCase()) || m.selector.toLowerCase().includes(k.toLowerCase())),
+      );
+      // 关键词过滤可能过度裁剪，只在有结果时替换
+      if (filteredByKw.length > 0) {
+        candidates = filteredByKw;
+      }
+    }
+
+    // 6. 收集命中索引及上下文邻居（±1）
+    for (const [idx] of candidates) {
+      const index = Number(idx);
+      hitIndices.add(index);
+      if (index - 1 >= 0) hitIndices.add(index - 1);
+      hitIndices.add(index + 1); // 越界由 pruneDomText 处理
+    }
+  }
+
+  return hitIndices;
+}
+
+/**
+ * Plan B 语义降级
+ * 使用 transformers.js 对 elementMap.embeddingText 做向量 Top-K 召回
+ */
+async function planBSemanticFallback(
+  flow: FlowStep[],
+  domText: DomText,
+  elementMap: ElementMap,
+): Promise<{ filteredDomText: DomText; matches: Array<{ index: number; score: number; matchedStep: number }> }> {
+  const entries = Object.entries(elementMap);
+  if (entries.length === 0) {
+    return { filteredDomText: domText, matches: [] };
+  }
+
+  // 为所有元素生成 embedding
+  const texts = entries.map(([, m]) => m.embeddingText);
+  let elementVectors: number[][];
+  try {
+    elementVectors = await getEmbeddings(texts);
+  } catch (e) {
+    log('Plan B embedding failed, returning full domText', e instanceof Error ? e.message : String(e));
+    return { filteredDomText: domText, matches: [] };
+  }
+
+  const hitIndices = new Set<number>();
+  const allMatches: Array<{ index: number; score: number; matchedStep: number }> = [];
+
+  for (let stepIdx = 0; stepIdx < flow.length; stepIdx++) {
+    const step = flow[stepIdx];
+    if (step.action === 'navigate') continue;
+
+    // 生成 step 查询文本
+    const queryParts = [step.target, step.desc];
+    if (step.elementHint?.keywords) queryParts.push(...step.elementHint.keywords);
+    const queryText = queryParts.filter(Boolean).join(' ');
+
+    let queryVector: number[];
+    try {
+      queryVector = await getEmbedding(queryText);
+    } catch {
+      continue;
+    }
+
+    // Top-K 召回
+    const items = entries.map(([idx], i) => ({
+      vector: elementVectors[i],
+      item: Number(idx),
+    }));
+
+    const topK = findTopKSimilar(queryVector, items, 5, 0.3);
+    for (const { item: idx, score } of topK) {
+      hitIndices.add(idx);
+      if (idx - 1 >= 0) hitIndices.add(idx - 1);
+      hitIndices.add(idx + 1);
+      allMatches.push({ index: idx, score, matchedStep: stepIdx });
+    }
+  }
+
+  const filteredDomText = pruneDomText(domText, hitIndices);
+  return { filteredDomText, matches: allMatches };
+}
+
+/**
+ * Vector 智能网关主入口
+ */
+export async function vectorGateway(
+  flow: FlowStep[],
+  domText: DomText,
+  elementMap: ElementMap,
+  callbacks: VectorCallbacks = {},
+): Promise<VectorGatewayResult> {
+  const originalLines = domText.split('\n').filter((l) => l.trim()).length;
+
+  // 判断是否走 Plan B
+  const vague = isVagueFlow(flow);
+
+  if (vague) {
+    // === Plan B: 语义降级 ===
+    log('Plan B: semantic fallback', { originalLines });
+    const { filteredDomText, matches } = await planBSemanticFallback(flow, domText, elementMap);
+    const filteredLines = filteredDomText.split('\n').filter((l) => l.trim()).length;
+    const ratio = originalLines > 0 ? Math.round((1 - filteredLines / originalLines) * 100) : 0;
+
+    const result: VectorGatewayResult = {
+      filteredDomText,
+      route: 'PLAN_B_SEMANTIC',
+      originalLines,
+      filteredLines,
+      compressionRatio: `${ratio}%`,
+      semanticMatches: matches,
+    };
+
+    callbacks.onGateway?.({
+      route: 'PLAN_B_SEMANTIC',
+      originalLines,
+      filteredLines,
+      compressionRatio: `${ratio}%`,
     });
-    send('vector.done', {
-      stepIndex: 0,
-      target: '',
-      totalCandidates: scan.elements.length,
-      afterHardFilter: vectorResult.elements.length,
-      results: vectorResult.matches.slice(0, 5).map((m, i) => {
-        // 根据 matchType 推算分数明细
-        const isEmbedding = m.matchType === 'embedding' || m.matchType === 'hint' || m.matchType === 'positional';
-        const isKeyword = m.matchType === 'keyword';
-        const isPositional = m.matchType === 'positional';
-        return {
-          rank: i + 1,
-          selector: m.element.selector,
-          label: m.element.label,
-          score: m.score,
-          breakdown: {
-            vectorScore: isEmbedding ? Math.min(m.score / 0.5, 1) : 0,
-            keywordScore: isKeyword ? Math.min(m.score / 0.2, 1) : 0,
-            positionalScore: isPositional ? 0.3 : 0,
-            zoneBoost: 0,
-          },
-        };
-      }),
-      elapsedMs: 0,
-    }, sessionId);
-    close();
-    return vectorResult;
-  })();
 
-  return { stream, result };
+    return result;
+  }
+
+  // === Plan A: 硬过滤 ===
+  log('Plan A: hard filter', { originalLines });
+  const hitIndices = planAHardFilter(flow, elementMap);
+
+  // Plan A 结果为空时自动降级到 Plan B
+  if (hitIndices.size === 0) {
+    log('Plan A yielded 0 results, falling back to Plan B');
+    const { filteredDomText, matches } = await planBSemanticFallback(flow, domText, elementMap);
+    const filteredLines = filteredDomText.split('\n').filter((l) => l.trim()).length;
+    const ratio = originalLines > 0 ? Math.round((1 - filteredLines / originalLines) * 100) : 0;
+
+    const result: VectorGatewayResult = {
+      filteredDomText,
+      route: 'PLAN_B_SEMANTIC',
+      originalLines,
+      filteredLines,
+      compressionRatio: `${ratio}%`,
+      semanticMatches: matches,
+    };
+
+    callbacks.onGateway?.({
+      route: 'PLAN_B_SEMANTIC',
+      originalLines,
+      filteredLines,
+      compressionRatio: `${ratio}%`,
+    });
+
+    return result;
+  }
+
+  const filteredDomText = pruneDomText(domText, hitIndices);
+  const filteredLines = filteredDomText.split('\n').filter((l) => l.trim()).length;
+  const ratio = originalLines > 0 ? Math.round((1 - filteredLines / originalLines) * 100) : 0;
+
+  const result: VectorGatewayResult = {
+    filteredDomText,
+    route: 'PLAN_A_HARDFILTER',
+    originalLines,
+    filteredLines,
+    compressionRatio: `${ratio}%`,
+  };
+
+  callbacks.onGateway?.({
+    route: 'PLAN_A_HARDFILTER',
+    originalLines,
+    filteredLines,
+    compressionRatio: `${ratio}%`,
+  });
+
+  log('done', { route: 'PLAN_A_HARDFILTER', originalLines, filteredLines, compressionRatio: `${ratio}%` });
+
+  return result;
 }

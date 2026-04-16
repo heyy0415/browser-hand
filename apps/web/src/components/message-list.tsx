@@ -3,15 +3,74 @@ import type {
   Message,
   ThinkingState,
   RunnerStepInfo,
-  ExtractedContent,
+  VectorGatewayInfo,
+  StateChangeInfo,
+  RoundInfo,
 } from "../types";
 
 // ═══════════════════════════════════════════════════════════════════════
-// 子组件：思考过程面板
+// 11.1: VectorGatewaySection 组件
 // ═══════════════════════════════════════════════════════════════════════
+
+const VectorGatewaySection: FC<{ gateway: VectorGatewayInfo }> = ({ gateway }) => {
+  const isPlanA = gateway.route === "PLAN_A_HARDFILTER";
+  const label = isPlanA ? "极速拦截" : "语义降级";
+  const desc = isPlanA
+    ? `走 Plan A 硬过滤，上下文压缩 ${gateway.compressionRatio} (${gateway.originalLines}行 → ${gateway.filteredLines}行)`
+    : "走 Plan B 向量检索";
+
+  return (
+    <div className="bh-gateway">
+      <span className={`bh-gateway-badge ${isPlanA ? "bh-gateway-badge--a" : "bh-gateway-badge--b"}`}>
+        [{label}]
+      </span>
+      <span className="bh-gateway-desc">{desc}</span>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// 11.3: 优化 ThinkingSection — 解析 thinking 中的检查清单
+// ═══════════════════════════════════════════════════════════════════════
+
+/** 尝试将 thinking 文本解析为简洁的自然语言描述 */
+function parseThinkingToSummary(content: string): string[] {
+  const lines: string[] = [];
+
+  // 尝试提取 JSON 检查清单中的关键字段
+  const platformMatch = content.match(/平台判定:\s*(.+)/);
+  if (platformMatch) {
+    lines.push(`平台: ${platformMatch[1].trim()}`);
+  }
+
+  const stepsMatch = content.match(/操作拆解:\s*(.+)/);
+  if (stepsMatch) {
+    lines.push(`操作: ${stepsMatch[1].trim()}`);
+  }
+
+  const positionMatch = content.match(/位置提取:\s*(.+)/);
+  if (positionMatch && !positionMatch[1].includes("无")) {
+    lines.push(`位置: ${positionMatch[1].trim()}`);
+  }
+
+  const contextMatch = content.match(/上下文校验:\s*(.+)/);
+  if (contextMatch && !contextMatch[1].includes("跳过")) {
+    lines.push(`上下文: ${contextMatch[1].trim()}`);
+  }
+
+  // 如果无法解析出结构化信息，返回原始文本的前 3 行
+  if (lines.length === 0) {
+    const rawLines = content.trim().split("\n").filter((l) => l.trim()).slice(0, 3);
+    return rawLines;
+  }
+
+  return lines;
+}
 
 const ThinkingSection: FC<{ thinking: ThinkingState }> = ({ thinking }) => {
   if (!thinking.content.trim()) return null;
+
+  const summaryLines = parseThinkingToSummary(thinking.content.trim());
 
   return (
     <div className={`bh-thinking`}>
@@ -23,13 +82,17 @@ const ThinkingSection: FC<{ thinking: ThinkingState }> = ({ thinking }) => {
           <span className="bh-thinking-title">思考过程</span>
         </div>
       </div>
-      {<div className="bh-thinking-text">{thinking.content.trim()}</div>}
+      <div className="bh-thinking-text">
+        {summaryLines.map((line, i) => (
+          <div key={i}>{line}</div>
+        ))}
+      </div>
     </div>
   );
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// 子组件：Runner 执行时间线（含内联提取内容）
+// Runner 执行时间线（含内联提取内容 + 11.2 重入扫描提示行）
 // ═══════════════════════════════════════════════════════════════════════
 
 const ACTION_LABELS: Record<string, string> = {
@@ -52,9 +115,33 @@ function getActionLabel(code: string): string {
   return m ? ACTION_LABELS[m[1]] || m[1] : code;
 }
 
-const RunnerTimeline: FC<{ steps: RunnerStepInfo[]; running: boolean }> = ({
+/** 11.2: 重入扫描提示行 */
+const StateChangeHint: FC<{ changes: StateChangeInfo[] }> = ({ changes }) => {
+  if (changes.length === 0) return null;
+  return (
+    <div className="bh-state-change-hint">
+      {changes.map((change, i) => (
+        <div key={i} className="bh-state-change-item">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ marginRight: 6, flexShrink: 0 }}>
+            <path d="M6 1L11 6L6 11L1 6Z" stroke="currentColor" strokeWidth="1.2" fill="none" />
+          </svg>
+          <span>检测到页面变更: {change.reason}{change.target ? ` → ${change.target}` : ""}</span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+const RunnerTimeline: FC<{
+  steps: RunnerStepInfo[];
+  running: boolean;
+  roundLabel?: string;
+  stateChanges?: StateChangeInfo[];
+}> = ({
   steps,
   running,
+  roundLabel,
+  stateChanges,
 }) => {
   return (
     <div className="bh-timeline">
@@ -65,8 +152,14 @@ const RunnerTimeline: FC<{ steps: RunnerStepInfo[]; running: boolean }> = ({
             style={{ marginRight: 8 }}
           />
         )}
-        <span className="bh-timeline-title">任务执行</span>
+        <span className="bh-timeline-title">
+          {roundLabel ? `${roundLabel}` : '任务执行'}
+        </span>
       </div>
+      {/* 11.2: 重入扫描提示行 */}
+      {stateChanges && stateChanges.length > 0 && (
+        <StateChangeHint changes={stateChanges} />
+      )}
       {steps.map((step, index) => (
         <div key={step.lineNumber} className="bh-timeline-step">
           <div className="bh-timeline-rail">
@@ -122,7 +215,6 @@ const RunnerTimeline: FC<{ steps: RunnerStepInfo[]; running: boolean }> = ({
             {/* 内联提取内容：文本 */}
             {step.extractedText && (
               <div className="bh-timeline-extract">
-                <div className="bh-timeline-extract-label">提取内容</div>
                 <div className="bh-timeline-extract-text">
                   {step.extractedText}
                 </div>
@@ -147,57 +239,17 @@ const RunnerTimeline: FC<{ steps: RunnerStepInfo[]; running: boolean }> = ({
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// 子组件：提取内容汇总展示
-// ═══════════════════════════════════════════════════════════════════════
-
-const ExtractedContentSection: FC<{ content: ExtractedContent }> = ({
-  content,
-}) => {
-  if (
-    content.textResults.length === 0 &&
-    content.screenshotResults.length === 0
-  ) {
-    return null;
-  }
-
-  return (
-    <div className="bh-extracted">
-      <div className="bh-extracted-header">
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-          <path
-            d="M2 3h10M2 7h10M2 11h7"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-          />
-        </svg>
-        提取结果
-      </div>
-      {content.textResults.map((result, i) => (
-        <div key={i} className="bh-extracted-item">
-          <div className="bh-extracted-selector">{result.selector}</div>
-          <div className="bh-extracted-value">{result.text}</div>
-        </div>
-      ))}
-      {content.screenshotResults.map((screenshot, i) => (
-        <div key={`ss-${i}`} className="bh-extracted-screenshot">
-          <img
-            src={`data:image/png;base64,${screenshot}`}
-            alt={`screenshot-${i}`}
-          />
-        </div>
-      ))}
-    </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════════════════
 // 主组件：消息列表
 // ═══════════════════════════════════════════════════════════════════════
 
 interface MessageListProps {
   messages: Message[];
   loading: boolean;
+}
+
+/** 判断 Scanner 是否已完成（用于决定 VectorGatewaySection 的显示时机） */
+function isScannerDone(round: RoundInfo): boolean {
+  return round.pipeline.scanner === "done" || round.pipeline.scanner === "error";
 }
 
 export const MessageList: FC<MessageListProps> = ({ messages, loading }) => (
@@ -213,26 +265,49 @@ export const MessageList: FC<MessageListProps> = ({ messages, loading }) => (
           {message.thinking && !message.asking && (
             <ThinkingSection thinking={message.thinking} />
           )}
-          {/* Runner 执行时间线 */}
-          {message.pipeline?.scanner &&
-            message.pipeline.scanner !== 'pending' &&
-            !message.asking && (
-              <RunnerTimeline
-                steps={message.runnerSteps ?? []}
-                running={
-                  message.pipeline.runner !== 'done' &&
-                  message.pipeline.runner !== 'error' &&
-                  !message.isError
-                }
-              />
-            )}
 
-          {/* 提取内容汇总（仅当没有内联提取时显示，或作为兜底） */}
-          {message.extractedContent &&
-            message.extractedContent.textResults.length > 0 &&
-            !message.asking && (
-              <ExtractedContentSection content={message.extractedContent} />
-            )}
+          {/* 多轮执行时间线 */}
+          {message.rounds && message.rounds.length > 0 && !message.asking
+            ? // 多轮模式：渲染每一轮（只显示已开始的轮次）
+              message.rounds
+                .filter((round) => round.pipeline.scanner !== "pending")
+                .map((round) => (
+                  <div key={`round-${round.roundIndex}`}>
+                    {/* 每轮的 VectorGatewaySection */}
+                    {round.vectorGateway && isScannerDone(round) && (
+                      <VectorGatewaySection gateway={round.vectorGateway} />
+                    )}
+                    <RunnerTimeline
+                      steps={round.runnerSteps}
+                      running={
+                        round.pipeline.runner !== "done" &&
+                        round.pipeline.runner !== "error" &&
+                        !message.isError &&
+                        round.roundIndex === message.rounds!.length - 1
+                      }
+                      roundLabel={
+                        message.rounds!.length > 1
+                          ? `第 ${round.roundIndex + 1} 轮 · 任务执行`
+                          : undefined
+                      }
+                      stateChanges={round.stateChanges}
+                    />
+                  </div>
+                ))
+            : // 单轮模式（向后兼容）
+              message.pipeline?.scanner &&
+              message.pipeline.scanner !== "pending" &&
+              !message.asking && (
+                <RunnerTimeline
+                  steps={message.runnerSteps ?? []}
+                  running={
+                    message.pipeline.runner !== "done" &&
+                    message.pipeline.runner !== "error" &&
+                    !message.isError
+                  }
+                  stateChanges={message.stateChanges}
+                />
+              )}
 
           {/* 错误区域 */}
           {message.errorMessage && (
