@@ -641,6 +641,7 @@ select {
   border-radius: 8px;
   font-size: 12.5px;
   line-height: 1.5;
+  word-break: break-all;
 }
 
 .bh-gateway-badge {
@@ -664,9 +665,7 @@ select {
 
 .bh-gateway-desc {
   color: #6e7191;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  word-break: break-all;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════

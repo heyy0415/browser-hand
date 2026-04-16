@@ -12,7 +12,9 @@ import type {
 // 11.1: VectorGatewaySection 组件
 // ═══════════════════════════════════════════════════════════════════════
 
-const VectorGatewaySection: FC<{ gateway: VectorGatewayInfo }> = ({ gateway }) => {
+const VectorGatewaySection: FC<{ gateway: VectorGatewayInfo }> = ({
+  gateway,
+}) => {
   const isPlanA = gateway.route === "PLAN_A_HARDFILTER";
   const label = isPlanA ? "极速拦截" : "语义降级";
   const desc = isPlanA
@@ -21,7 +23,9 @@ const VectorGatewaySection: FC<{ gateway: VectorGatewayInfo }> = ({ gateway }) =
 
   return (
     <div className="bh-gateway">
-      <span className={`bh-gateway-badge ${isPlanA ? "bh-gateway-badge--a" : "bh-gateway-badge--b"}`}>
+      <span
+        className={`bh-gateway-badge ${isPlanA ? "bh-gateway-badge--a" : "bh-gateway-badge--b"}`}
+      >
         [{label}]
       </span>
       <span className="bh-gateway-desc">{desc}</span>
@@ -60,7 +64,11 @@ function parseThinkingToSummary(content: string): string[] {
 
   // 如果无法解析出结构化信息，返回原始文本的前 3 行
   if (lines.length === 0) {
-    const rawLines = content.trim().split("\n").filter((l) => l.trim()).slice(0, 3);
+    const rawLines = content
+      .trim()
+      .split("\n")
+      .filter((l) => l.trim())
+      .slice(0, 3);
     return rawLines;
   }
 
@@ -119,14 +127,17 @@ function getActionLabel(code: string): string {
 const StateChangeHint: FC<{ changes: StateChangeInfo[] }> = ({ changes }) => {
   if (changes.length === 0) return null;
   return (
-    <div className="bh-state-change-hint">
+    <div className="bh-gateway">
       {changes.map((change, i) => (
-        <div key={i} className="bh-state-change-item">
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ marginRight: 6, flexShrink: 0 }}>
-            <path d="M6 1L11 6L6 11L1 6Z" stroke="currentColor" strokeWidth="1.2" fill="none" />
-          </svg>
-          <span>检测到页面变更: {change.reason}{change.target ? ` → ${change.target}` : ""}</span>
-        </div>
+        <span key={i}>
+          <span className="bh-gateway-badge bh-gateway-badge--b">
+            [监测到页面变更]
+          </span>
+          <span className="bh-gateway-desc">
+            {change.reason ? ` ${change.reason}` : ""}{" "}
+            {change.target ? ` → ${change.target}` : ""}
+          </span>
+        </span>
       ))}
     </div>
   );
@@ -137,12 +148,7 @@ const RunnerTimeline: FC<{
   running: boolean;
   roundLabel?: string;
   stateChanges?: StateChangeInfo[];
-}> = ({
-  steps,
-  running,
-  roundLabel,
-  stateChanges,
-}) => {
+}> = ({ steps, running, roundLabel, stateChanges }) => {
   return (
     <div className="bh-timeline">
       <div className="bh-timeline-header">
@@ -153,7 +159,7 @@ const RunnerTimeline: FC<{
           />
         )}
         <span className="bh-timeline-title">
-          {roundLabel ? `${roundLabel}` : '任务执行'}
+          {roundLabel ? `${roundLabel}` : "任务执行"}
         </span>
       </div>
       {/* 11.2: 重入扫描提示行 */}
@@ -249,7 +255,9 @@ interface MessageListProps {
 
 /** 判断 Scanner 是否已完成（用于决定 VectorGatewaySection 的显示时机） */
 function isScannerDone(round: RoundInfo): boolean {
-  return round.pipeline.scanner === "done" || round.pipeline.scanner === "error";
+  return (
+    round.pipeline.scanner === "done" || round.pipeline.scanner === "error"
+  );
 }
 
 export const MessageList: FC<MessageListProps> = ({ messages, loading }) => (
