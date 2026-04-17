@@ -6,6 +6,6 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "include": ["layers", "*.ts"],
+  "include": ["layers", "*.ts", "utils/scanner-worker.mjs", "utils/scanner-extraction-script.ts"],
   "exclude": ["node_modules", "dist"]
 }

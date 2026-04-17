@@ -3,7 +3,7 @@
 import type { Page, CDPSession } from 'playwright';
 import { logger } from '../llm';
 import type { ScannerResult, ScanOptions, PageSummary, ElementRect, ElementMap, VisibleTextNode } from '../types';
-import { EXTRACTION_SCRIPT } from './scanner-extraction-script';
+import { EXTRACTION_SCRIPT } from '../utils/scanner-extraction-script';
 
 const log = (msg: string, meta?: unknown) => logger.info('scanner', msg, meta);
 
