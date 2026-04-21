@@ -1,0 +1,12 @@
+{
+  "name": "@browser-hand/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "openai": "^4.78.0"
+  }
+}

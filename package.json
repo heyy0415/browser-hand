@@ -1,0 +1,11 @@
+{
+  "name": "browser-hand",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "bun run dev:server & bun run dev:web",
+    "dev:server": "bun run --filter ./packages/server dev",
+    "dev:web": "bun run --filter ./packages/web dev",
+    "build": "bun run --filter ./packages/web build"
+  }
+}
